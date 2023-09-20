@@ -1,0 +1,514 @@
+---
+title: Suvival workshop, part 1
+author: Terry Therneau
+output: beamer_presentation
+---
+
+```{r, setup, echo=FALSE}
+knitr::opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
+               warning=FALSE, error=FALSE)
+library(survival)
+library(splines)
+crisk <- function(what, horizontal = TRUE, ...) {
+    nstate <- length(what)
+    connect <- matrix(0, nstate, nstate,
+                      dimnames=list(what, what))
+    connect[1,-1] <- 1  # an arrow from state 1 to each of the others
+    if (horizontal) statefig(c(1, nstate-1),  connect, ...)
+    else statefig(matrix(c(1, nstate-1), ncol=1), connect, ...)
+}
+
+
+```
+
+## Career
+- 1975, BA St Olaf college
+- 1976-79 Programmer, Mayo Clinic
+- 1979-83 PhD student, Stanford
+- 1983-85 Asst Professor, U of Rochester
+- 1985-23 Mayo Clinic
+
+## Computing
+- Languages: Fortran, Basic, Focal, APL, PL/1, C, awk, lex, yacc, (python)
+- Assembler: IBM 11/30, PDP 11, VAX, IBM 360
+- Statistical: BMDP, SAS, S, Splus, R, (minitab, SPSS, matlab)
+- OS: DMS (11/30), DEC RSTS, DEC Tops20, JCL (cards), Wylbur, CMS, Unix (Bell,
+Berkeley, SUN, Linux)
+- code: Panvalet, SCCS, rcs, cvs, svn, mercurial, git
+
+## Cox model
+- 1977: use shared Fortran code
+- 1978: create SAS proc coxregr, presented at SUGI 79, added to SAS Supplemental
+proceedures, meet Frank Harrell
+- 1984: first S code, to investigate residuals
+- 1987(?): survival becomes part of Splus, code on statlib
+- ? move to R
+- 9/2010  first commit to current Mercurial library
+
+## Cox model
+ $$\begin{aligned}
+  \lambda(t;z) &= \exp(\beta_0(t) + \beta_1 x_1 + \beta_2 x_2 + \ldots)\\
+               &= e^{\beta_0(t)} e^\eta \\
+			   &= \lambda_0(t)  e^\eta
+\end{aligned}
+$$
+
+- Lottery model
+  * at each event time there is a drawing for the winner
+  * each obs has $r_i = \exp(\eta)$ tickets
+  * P(subject $i$ wins) = $r_i/ \sum_{at risk} r_j$
+
+## Additive models
+- The three most popular models in statistics
+   * Linear: $E(y) = \beta_0 + \beta_1 x_1 + \beta_2 x_2 + \ldots$
+   * GLM: $E(y) = g\left(\beta_0 + \beta_1 x_1 + \beta_2 x_2 + \ldots \right)$
+   * Cox: $\lambda(t) = g\left(\beta_0(t) + \beta_1 x_1 + \beta_2 x_2 + \ldots \right)$
+- Why?  Simplicity.
+   * If `x1= apoepos`, then $\beta_1$ is *THE* effect of APOE, independent of any other variables in the model.
+   * Statisticians like this.
+   * Investigators really like this (a single p-value)
+- Generalized additive models will replace one of the $\beta x$ terms
+      with $s(x)$, but retain the separability.
+
+## Successful statistical models
+1. Simplicity: in the sense described above, leading to simple explanations
+    for the effect of key predictors.
+2. Statistical validity: the model must describe the data adequately. ``All 
+models are wrong.  The practical question is whether a model is wrong enough to
+not be useful.'' George Box
+3. Numerical stability: the code to fit a model does not require hand-holding
+or fiddling with tuning parameters: it just runs.
+4. Speed
+
+- The transform $g$ gets chosen to fit criteria 3; if it helps with criteria 2 
+that is mostly luck.  (It nearly always impedes interpretability).
+- $\exp(\eta)$:
+  * no negative values (dead coming back to life)
+  * mulitiplicative hazards: sometimes okay, sometimes not
+  
+
+---
+
+## US Death Rates
+
+```{r, death}
+matplot(60:100, 36525* survexp.us[61:101, 1:2, "2014"], col=2:1, lty=1, lwd=2,
+	xlab="Age", ylab="Death rate per 100", log='y', type='l', yaxt='n')
+#    main="US Death Rates")
+axis(2, c(1,2,5,10,20, 50), c(1,2,5,10, 20, 50), las=2)
+legend(65, 20, c("Male", "Female"), lty=1, lwd=2, col=2:1, bty='n')
+```
+
+## Hip fracture rates
+
+```{r, hips}
+dirk <- readRDS("data/hips.rds")
+dfit1 <- glm(event_f ~ ns(year, df=4) + ns(age, df=4) + offset(log(pop_f)),
+            quasipoisson, data=dirk, subset=(age > 30 & age < 101 & pop_f > 0))
+dfit2 <- glm(event_m ~ ns(year, df=4) + ns(age, df=4) + offset(log(pop_m)),
+            quasipoisson, data=dirk, subset=(age > 30 & age < 101 & pop_m > 0))
+dummy <- data.frame(year=1950, age=40:99, pop_f=1e5, pop_m= 1e5)
+yhat1 <- predict(dfit1, newdata=dummy, se.fit=TRUE)
+yhat2 <- predict(dfit2, newdata=dummy, se.fit=TRUE)
+
+yy <- cbind(yhat1$fit + outer(yhat1$se.fit, c(0, -1.96, 1.96), '*'),
+            yhat2$fit + outer(yhat2$se.fit, c(0, -1.96, 1.96), '*'))
+matplot(40:99, exp(yy), log='y', type='l',col=c(1,1,1,2,2,2), lwd=2, 
+        lty=c(1,2,2), yaxt='n',
+        ylab="Rate per 100,000", xlab="Age")
+#        main="Hip fracture, Olmsted County, 1929- 1992")
+ylab=c(5, 50, 500, 5000)
+axis(2, ylab, as.character(ylab), las=2)
+```
+
+## Assumptions
+- Proportional hazards
+  * Very strong assumption
+  * Surprisingly often, it is 'close enough'
+  * Always check it, however. 
+- Additivity
+  * Strong assumption
+  * Never perfectly true, maybe okay (but we love it so much)
+  * Always check
+  * adding '*' is not sufficient
+- Linearity
+  * Moderately strong, depending on the range of $x$
+  * Use a spline, and look
+  * IMHO, automatic df choices overfit
+- No naked p values allowed!
+
+## PH failure
+$$ \lambda(t; x) = \lambda_1(t) e^{X\beta} + \lambda_2(t) e^{X\gamma} + \ldots$$
+
+- $\lambda_1$ = acute disease process
+- $\lambda_2$ = population mortality
+
+## Computation
+- first derivative = $\sum(x_i - \overline x) = m'X$
+- very quadratic
+- simple starting estimate
+
+## Poisson approximation
+```{r, poisson, echo=FALSE}
+cdata <- subset(colon, etype==1)
+csurv <- survfit(Surv(time/365.25, status) ~1, data=cdata)
+plot(csurv, fun="cumhaz", conf.int=FALSE, lwd=2,
+     xlab="Time since randomization", ylab="Cumulative Hazard")
+lines(c(0, 2, 5.5, 9), c(0, .5, .7, .73), col=2, lwd=2)
+#lines(c(0, .2, 2, 3.5, 6, 9), c(0, .02, .49, .61, .71, .73), col=4, lwd=2)
+```
+
+---
+
+```{r, echo=TRUE, fig.show='hide'}
+cdata <- subset(colon, etype==1)
+cdata$years <- cdata$time/365.35
+csurv <- survfit(Surv(years, status) ~1, data=cdata)
+plot(csurv, fun="cumhaz", conf.int=FALSE, lwd=2,
+     xlab="Time since randomization", ylab="Cumulative Hazard")
+lines(c(0, 2, 5.5, 9), c(0, .5, .7, .73), col=2, lwd=2)
+
+cdata2 <- survSplit(Surv(years, status) ~., data=cdata, cut=c(2, 5.5),
+    episode="interval")
+cfit1 <- coxph(Surv(years, status) ~ rx + extent + node4, cdata)
+cfit2 <- glm(status ~ rx + extent + node4 + factor(interval)+ 
+                 offset(log(time-tstart)), family=poisson, data=cdata2)
+round(summary(cfit1)$coef[,1:3], 2)
+round(summary(cfit2)$coef[,1:2], 2)
+```
+
+## Other models
+- Proportional odds
+  * $P(y < k; x) = g(\beta_0(k) + \beta_1 x_1 + \beta_2 x_2 + \ldots)$
+  * I am dubious
+  * Essentially the same is assumed when a logistic regression fit is applied
+  to population with different prevalence.
+- Fine-Gray model
+  * $p_k(t; x) = g(\beta_0(t) + \beta_1 x_1 + \beta_2 x_2 + \ldots)$
+  * Rarely if ever true
+  
+  
+## Counting process notation
+ - $N_i(t)$ = number of events, up to time $t$, for subject $i$
+ - $N_{ijk}(t)$ = transtions from state $j$ to state $k$
+ - $Y_{ij}(t)$ = 1 if subject $i$ is in state $j$ and at risk
+ - $X(t)$ = covarates at time $t$
+ - Key: $N$ is left continuous, $Y$ and $X$ are right continuous
+ - predictable process
+ 
+ 
+## Immortal time bias
+ - any of N, Y, or X depend on the future
+ - most common error is in X
+   * responders vs non-responders
+   * Redmond paper: total dose received, average dose received
+   * many others
+- Y, who is at risk
+   * nested case-control, excluding future events from the risk set at time t
+- N, what is an event
+   * diabetes = two visits at least 6 months apart that satisfy criteria
+   * incidence of diabetes defined as the first one
+   
+---
+
+```{r, sim1}
+set.seed(1953)  # a good year
+nvisit <- floor(pmin(lung$time/30.5, 12))
+freepark <- rbinom(nrow(lung), nvisit, .05) > 0
+badfit <- survfit(Surv(time/365.25, status) ~ freepark, data=lung)
+plot(badfit, mark.time=FALSE, lty=1:2, 
+     xlab="Years post diagnosis", ylab="Survival")
+legend(1.5, .8, c("Lucky", "No free parking"), 
+       lty=2:1, bty='n')
+
+cfit <- coxph(Surv(time,status) ~ freepark, data=lung)
+```
+
+## Monoclonal Gammopathy
+```{r, kyle1}
+ptime <- with(mgus, ifelse(is.na(pctime), futime, pctime))
+pstat <- with(mgus, ifelse(is.na(pctime), 0, 1))
+kfit <- survfit(Surv(ptime/365.25, pstat) ~ 1)
+plot(kfit, fun="event", xmax=30, xlab="Years from MGUS", ylab="Myeloma")
+
+## Multi-state hazard models
+```{r, multi1}
+oldpar <- par(usr=c(0,100,0,100), mar=c(.1, .1, .1, .1), mfrow=c(2,2))
+# first figure
+states <- c("Alive","Dead")
+connect <- matrix(0,nrow=2,ncol=2, dimnames=list(states,states))
+connect[1,2] <- 1
+statefig(layout= matrix(2,1,1), connect)
+
+# second
+states <- c("0", "1", "2", "...")
+connect <- matrix(0L, 4, 4, dimnames=list(states, states))
+connect[1,2] <- connect[2,3] <- 1
+connect[3,4] <- 1
+statefig(matrix(4,1,1), connect)
+
+# third figure
+states <- c("A","D1","D2","D3")
+connect <- matrix(0,nrow=4,ncol=4, dimnames=list(states,states))
+connect[1,2:4] <- 1
+statefig(layout=c(1,3), connect)
+
+# fourth figure
+states <- c("Health","Illness","Death")
+connect <- matrix(0,nrow=3,ncol=3, dimnames=list(states,states))
+connect[1,2] <- 1
+connect[2,1] <- 1
+connect[,3]  <- 1  # all connect to death
+statefig(layout=c(1,2), connect, offset=.02)
+
+par(oldpar)
+```
+   
+## Key Concepts
+- Each arrow is a transition
+  * Hazard rate
+  * If Markov, each can be estimated independently
+  * Looks like a Cox model
+- Each box is a state
+  * Estimation must be done all at once
+  * $p_k(t)$ = prob(in state k at time t) depends on *all* the hazards
+- Hazards can be done one at a time, absolute risk must be done all at
+  once
+  
+## Absolute risk
+- $p(t)$ = probability in state
+- E(N(t))$ = expected number of visits to each state
+   * closely related to lifetime risk
+- Sojourn time = E(time in each state)
+   * restricted mean time in state (RMTS)
+   * for alive/dead: restricted mean survival time (RMST)
+- Duration in state = expected time per visit
+- Estimands
+
+## Tools
+- Build the data set, and check it
+- Start simple
+  * total endpoints of each type
+  * transtion rates = number/(person years at risk)
+  * LOOK at the data
+- Non-parametric
+  * Aalen-Johansen estimate
+- Multi-state models
+  
+## Myeloid data
+```{r, myeloid0}
+opar <- par(mfrow=c(1,2))
+# Simple version - what in theory should happen
+state1 <- c("Entry", "CR", "SCT", "Relapse", "Death")
+smat1 <- matrix(0L,5,5, dimnames=list(state1, state1))
+smat1[1,2] <- smat1[2,3] <- smat1[3,4] <- 1
+smat1[-5,5] <-1
+statefig(matrix(c(4,1),nrow=1), smat1, cex=.8)
+title("Ideal model")
+
+
+# More accurate version of the paths that people actually follow
+smat2 <- smat1
+smat2[1,3] <- smat2[2,4] <- smat2[1,4] <- 0.5
+smat2[3,2] <- 0.3
+# note the use of alty to modify the lines
+statefig(matrix(c(4,1),nrow=1), smat2, alty=c(1,2,2,1,2,2, 1,1,1,1,1), cex=.8)
+title("Reality")
+par(opar)
+```
+
+---
+
+
+```{r, myeloid1, echo=TRUE}
+load('data/myeloid.rda')
+myeloid[1:5,]
+```
+
+---
+
+```{r, msurv1}
+sfit0 <- survfit(Surv(futime,death) ~ trt, myeloid)
+sfit0b <- survfit(Surv(futime, death) ~ sex, myeloid)
+sfit0c <- survfit(Surv(futime, death) ~ flt3, myeloid)
+oldpar <- par(mfrow=c(2,2), mar=c(5,5,1,1))
+plot(sfit0, xscale=365.25, col=1:2, lwd=2,  xmax=4*365.25, fun="event",
+     xlab="Years from randomization", ylab="Death")
+abline(v= c(4,8)*30.5, lty=3)
+legend(730, .25, c("Trt A", "Trt B"), col=1:2, lwd=2, lty=1, bty='n')
+
+plot(sfit0b, xscale=365.25, col=1:2, lwd=2,  xmax=4*365.25, fun="event",
+     xlab="Years from randomization", ylab="Death")
+legend(730, .25, c("Female", "Male"), col=1:2, lwd=2, lty=1, bty='n')
+
+plot(sfit0c, xscale=365.25, col=1:3, lwd=2,  xmax=4*365.25, fun="event",
+     xlab="Years from randomization", ylab="Death")
+abline(v= c(4,8)*30.5, lty=3)
+legend(730, .25, c("TKD only", "ITD low", "ITD high"), col=1:3, lwd=2, 
+       lty=1, bty='n')
+par(oldpar)
+```
+
+## Multistate data
+- Rows with id, time1, time2, state, covariates, strata, cstate
+- Over the interval (time1, time2] these are the covariates, strata, current 
+state
+- at time2 there is a transition to a new state 'state'
+  * a factor variable whose first level is 'no change occured' (censoring)
+  * labels can be anything you wish
+- Looks a lot like time-dependent covariate data
+- The set of rows for a subject describes a feasable path
+  * can't be two places at once  (overlapping intervals)
+  * have to be somewhere (disconnected intervals)
+  * time in any state is > 0
+  * no teleporting
+- combat immortal time bias, easier code
+
+---
+
+```{r, myeloid2, echo=TRUE}
+mdata <- tmerge(myeloid[,1:4], myeloid,  id=id,  death= event(futime, death),
+                sct = event(txtime), cr = event(crtime), 
+                relapse = event(rltime))
+temp <- with(mdata, cr + 2*sct  + 4*relapse + 8*death)
+table(temp) 
+```
+
+---
+
+```{r}
+tdata <- myeloid  # temporary working copy
+tied <- with(tdata, (!is.na(crtime) & !is.na(txtime) & crtime==txtime))
+tdata$crtime[tied] <- tdata$crtime[tied] -1
+mdata <- tmerge(tdata[,1:4], tdata,  id=id,  death= event(futime, death),
+                sct = event(txtime), cr = event(crtime), 
+                relapse = event(rltime),
+                priorcr = tdc(crtime), priortx = tdc(txtime))
+temp <- with(mdata, cr + 2*sct  + 4*relapse + 8*death)
+table(temp)
+mdata$event <- factor(temp, c(0,1,2,4,8),
+                       c("none", "CR", "SCT", "relapse", "death"))
+
+mdata[1:8, c("id", "trt", "tstart", "tstop", "event", "priorcr", "priortx")]
+```
+
+---
+
+```{r, echo=TRUE}
+survcheck(Surv(tstart, tstop, event) ~1, mdata, id=id)
+```
+
+```{r, echo=TRUE}
+table(mdata$event)
+temp1        <- with(mdata, ifelse(priorcr, 0, c(0,1,0,0,2)[event]))
+mdata$crstat <- factor(temp1, 0:2, c("none", "CR", "death"))
+
+temp2        <- with(mdata, ifelse(priortx, 0, c(0,0,1,0,2)[event]))
+mdata$txstat <- factor(temp2, 0:2, c("censor", "SCT", "death"))
+
+temp3     <- with(mdata, c(0,0,1,0,2)[event] + priortx)
+mdata$tx2 <- factor(temp3, 0:3,
+                    c("censor", "SCT", "death w/o SCT", "death after SCT"))
+```
+
+```{r}
+tdata$futime <- tdata$futime * 12 /365.25
+mdata$tstart <- mdata$tstart * 12 /365.25
+mdata$tstop  <- mdata$tstop * 12 /365.25
+
+
+sfit1 <- survfit(Surv(futime, death)  ~ trt, tdata) # survival
+sfit2 <- survfit(Surv(tstart, tstop, crstat) ~ trt, 
+                 data= mdata, id = id) # CR
+sfit3 <- survfit(Surv(tstart, tstop, txstat) ~ trt, 
+                 data= mdata, id =id) # SCT
+
+layout(matrix(c(1,1,1,2,3,4), 3,2), widths=2:1)
+oldpar <- par(mar=c(5.1, 4.1, 1.1, .1))
+
+mlim   <- c(0, 48) # and only show the first 4 years
+plot(sfit2[,"CR"], xlim=mlim, 
+         lty=3, lwd=2, col=1:2, xaxt='n',
+     xlab="Months post enrollment", ylab="Fraction with the endpoint")
+lines(sfit1, mark.time=FALSE, xlim=mlim,
+      fun='event', col=1:2, lwd=2)
+
+lines(sfit3[,"SCT"], xlim=mlim, col=1:2, 
+          lty=2, lwd=2)
+
+xtime <- c(0, 6, 12, 24, 36, 48)
+axis(1, xtime, xtime) #axis marks every year rather than 10 months
+temp <- outer(c("A", "B"), c("CR", "transplant", "death"),  paste)
+temp[7] <- ""
+legend(25, .3, temp[c(1,2,7,3,4,7,5,6,7)], lty=c(3,3,3, 2,2,2 ,1,1,1),
+       col=c(1,2,0), bty='n', lwd=2)
+abline(v=2, lty=2, col=3)
+
+# add the state space diagrams
+par(mar=c(4,.1,1,1))
+crisk(c("Entry", "CR", "Death"), alty=3)
+crisk(c("Entry", "Tx", "Death"), alty=2)
+crisk(c("Entry","Death"))
+par(oldpar)
+layout(1)
+```
+
+----
+
+```{r, bad}
+badfit <- survfit(Surv(tstart, tstop, event=="SCT") ~ trt, 
+                       id=id, mdata, subset=(priortx==0))
+
+plot(badfit, fun="event", xmax=48, xaxt='n', col=1:2, lty=2, lwd=2,
+     xlab="Months from enrollment", ylab="P(Transplant)")
+axis(1, xtime, xtime)
+lines(sfit3[,2], xmax=48, col=1:2, lwd=2)
+legend(24, .3, c("Wrong A", "Wrong B", "Correct A", "Correct B"), 
+       lty=c(2,2,1,1), lwd=2,
+       col=1:2, bty='n', cex=1.2)
+```
+
+---
+
+```{r, echo=TRUE}
+tfit <- coxph(Surv(tstart, tstop, txstat) ~ trt + flt3, mdata, id=id)
+print(tfit, digits=2)
+```
+
+## Duration of CR
+```{r, mdur}
+state3 <- function(what, horizontal=TRUE, ...) {
+    if (length(what) != 3) stop("Should be 3 states")
+    connect <- matrix(c(0,0,0, 1,0,0, 1,1,0), 3,3,
+                      dimnames=list(what, what))
+    if (horizontal) statefig(1:2, connect, ...)
+    else statefig(matrix(1:2, ncol=1), connect, ...)
+}
+
+temp <- as.numeric(mdata$event)
+cr2 <- factor(c(1,2,1,3,3)[temp], 1:3, c('none', 'CR', 'Death/Relapse'))
+
+crsurv <- survfit(Surv(tstart, tstop, cr2) ~ trt,
+                  data= mdata, id=id, influence=TRUE)
+
+layout(matrix(c(1,1,2,3), 2,2), widths=2:1)
+oldpar <- par(mar=c(5.1, 4.1, 1.1, .1))
+plot(sfit2[,2], lty=3, lwd=2, col=1:2, xmax=12, 
+     xlab="Months", ylab="CR")
+lines(crsurv[,2], lty=1, lwd=2, col=1:2)
+par(mar=c(4, .1, 1, 1))
+crisk( c("Entry","CR", "Death"), alty=3)
+state3(c("Entry", "CR", "Death/Relapse"))
+
+par(oldpar)
+layout(1)
+```
+
+---
+
+```{r, echo=TRUE}
+print(crsurv, rmean=48, digits=2)
+```
+
+
+
