@@ -1,0 +1,539 @@
+---
+title: Competing risks and the Fine-Gray model
+author: Terry Therneau
+date: March 2023
+output: beamer_presentation
+---
+
+<!-- A talk for the division, March 2023 -->
+
+```{r, echo=FALSE}
+library(survival)
+library(splines)
+knitr::opts_chunk$set(comment=NA, tidy=FALSE, echo=FALSE,
+                      fig.height=6, fig.width=8,
+                      warning=FALSE, error=FALSE)
+options(contrasts= c("contr.treatment", "contr.poly"),
+        show.signif.stars = FALSE, continue = " ")
+par(mar=c(5,5,1,1))
+table2 <- function(...) table(..., useNA= "ifany")
+
+#palette("Okabe-Ito")
+data2 <- readRDS("data2.rds")  # from the long-term follow-up study
+data2$year1 <- 1*(data2$year==0)
+# collapse, for simpler presentation
+d2 <- survcondense(Surv(age1, age2, state) ~ male + educ + apoepos + icmc + 
+                          cstate + year1, data2, id= clinic)
+d2$edu4 <- pmax(d2$educ, 8)/4
+d2$cmc2 <- d2$icmc/2
+d2$cmc  <- d2$icmc
+
+# The contrast function is taken from 
+#      adir/Therneau/longterm.followup/tmt/marginal.Rnw
+#
+contrast <- function(fit, data, global=FALSE, weight, 
+                     tol=sqrt(.Machine$double.eps)) {
+    newx <- model.matrix(fit, data= data)
+    if (global)  # test for all differences =0
+        newx <- scale(newx[-1,], center=newx[1,], scale=FALSE)
+    else {    
+        if (missing(weight))  # subtract first row
+            newx <- scale(newx, center=newx[1,], scale=FALSE) 
+        else  { # use a weighted average
+            wt <- as.vector(weight/sum(weight)) # use a weighted average
+            if (length(wt) != nrow(newx)) stop("wrong length for weight")
+            newx <- scale(newx, center= wt %*% newx , scale=FALSE)
+        }
+    }
+    test <- drop(newx %*% coef(fit))
+    V    <- newx %*% vcov(fit) %*% t(newx)
+    if (global) {
+        stemp <- svd(V)
+        nonzero <- (stemp$d > tol)
+        ctemp <- test %*% stemp$u[,nonzero]
+        chi <- ctemp %*% diag(1/stemp$d[nonzero]) %*% c(ctemp)
+        c(chisq= drop(chi), df= sum(nonzero))
+    }
+    else {
+        std <- sqrt(diag(V))
+        z <- ifelse(std==0, 0, test/std)
+        cbind(estimate=test, std.err=std, z= z)
+    }
+}
+```
+## Free light chain
+```{r, c1}
+fdata <- subset(flchain, futime > 7)  # drop the eary deaths
+fdata$id <- 1:nrow(fdata)
+fdata$years <- fdata$futime/365.25
+fdata$flc10 <- 1*(fdata$flc.grp ==10)
+
+temp <-  with(fdata, ifelse(death==0, -1, 
+                            1*(chapter=="Circulatory") +
+                            2*(chapter=="Neoplasms") +
+                            3*(chapter=="Respiratory")))
+fdata$state <- factor(temp, c(-1, 1,2, 3, 0), 
+                      c("censor", "CVD", "Cancer", "Resp", "Other"))
+
+temp <- table2(fdata$state)
+
+sname <- paste(c("Entry", "CVD", "Cancer", "Resp", "Other"),
+               c(nrow(fdata), temp[2:5]), sep='\n')
+smat <- matrix(0, 5,5, dimnames=list(sname, sname))
+smat[1, 2:5] <- 1
+statefig(c(1,4), smat)
+```
+
+---
+
+```{r, fanal, echo = TRUE}
+# create a factor (class) variable (hidden)
+table(fdata$state)
+
+# Aalen-Johansen
+fsurv <- survfit(Surv(years, state) ~1, data=fdata, id=id)
+
+# Multi-state hazard model
+fcox  <- coxph(Surv(years, state) ~ age + sex + flc10, 
+               data= fdata, id = id)
+```
+
+---
+
+```{r, ag1}
+oldpar <- par(mfrow=c(1,2), mar=c(5,5,1,1))
+plot(fsurv, col=1:5, lwd=2, noplot="", lty=c(1,1:4),
+     xlab="Years", ylab="P(state)")
+legend(0, .7, c("Alive", "CVD", "Cancer", "Resp", "Other"), lwd=2,
+       col=1:5, lty=c(1, 1:4), bty='n')
+plot(fsurv, col=2:5, lwd=2, xscale=365.25, lty=c(1:4),
+     xlab="Years", ylab="P(state)")
+par(oldpar)
+
+```
+
+---
+
+The coxph call produces a multi-state hazard model fit.  One set of
+coefficients for each transition (arrow) in the diagram
+
+```{r, coef}
+ctemp <- coef(fcox)
+stemp <- sqrt(diag(vcov(fcox)))
+xtemp <- paste0(round(exp(ctemp),2), "(", round(ctemp/stemp,1), ")")
+xtemp <- matrix(xtemp, ncol=4)
+dimnames(xtemp) <- list(c("age", "male", "FLC"), 
+                        c("CVD", "Cancer", "Resp", "Other"))
+print(xtemp, quote=FALSE)
+```
+
+---
+
+## What is the effect of FLC on *cancer* death?
+Create predicted curves based on the fitted model.
+
+```{r, cvdeath, echo=TRUE}
+dummy <- expand.grid(flc10 = 0:1,  sex = c("F", "M"), 
+                     age= c(50,60, 70, 80))
+predsurv <- survfit(fcox, newdata=dummy)
+dim(predsurv)
+```
+
+---
+
+```{r, tplot}
+yr <- c(0, .18)
+oldpar <- par(mfrow=c(2,2), mar=c(5,5,1,1))
+plot(predsurv[1:4, 3], lty=2:1, col=c(1,1,2,2), lwd=2, ylim=yr,
+	xlab="Years", ylab="P(cancer)")
+legend(0, .17, c("M, FLC high", "F, FLC high", "M, FLC low", "F, FLC low"),
+       lty=c(1,1,2,2), col=2:1, lwd=2, bty='n', cex=.9)
+text(10, .01, "Age 50")
+plot(predsurv[5:8, 3], lty=2:1, col=c(1,1,2,2), lwd=2, ylim=yr,
+	xlab="Years", ylab="P(cancer)")
+text(10, .01, "Age 60")
+plot(predsurv[9:12, 3], lty=2:1, col=c(1,1,2,2), lwd=2, ylim= yr,
+	xlab="Years", ylab="P(cancer)")
+text(10, .01, "Age 70")
+plot(predsurv[13:16, 3], lty=2:1, col=c(1,1,2,2), lwd=2, ylim= yr,
+	xlab="Years", ylab="P(cancer)")
+text(10, .01, "Age 80")
+par(oldpar)
+
+```
+
+---
+
+```{r, tsum}
+stemp <- summary(predsurv, time=c(7, 14))$pstate[,,3]  # pick off Cancer
+# I want to present this as a table
+temp2 <- array(stemp, dim=c(2,2,8))
+delta <- temp2[,2,] - temp2[,1,]
+temp3 <- t(delta * 100)
+dimnames(temp3) <- list(paste(rep(paste("Age", c(50,60,70,80)),each=2),
+                              rep(c("Female", "Male"),4), sep=', '),
+                        c("7 year", "14 year"))
+round(temp3,2)
+```
+But the investigator wants a 1 number summary.
+
+---
+
+## Additive models
+- The three most popular models in statistics
+   * Linear: $E(y) = \beta_0 + \beta_1 x_1 + \beta_2 x_2 + \ldots$
+   * GLM: $E(y) = g\left(\beta_0 + \beta_1 x_1 + \beta_2 x_2 + \ldots \right)$
+   * Cox: $\lambda(t) = \exp\left(\beta_0(t) + \beta_1 x_1 + \beta_2 x_2 + \ldots \right)$
+- Why?  Simplicity.
+   * If `x1= FLC+`, then $\beta_1$ is *THE* effect of FLC, independent of any other variables in the model.
+   * Statisticians like this.
+   * Investigators really like this (a single p-value)
+- (Generalized additive models will replace one of the $\beta x$ terms
+      with $s(x)$, but retain the separability.)
+
+## 3 criteria for a successful statistical model
+1. Simplicity: in the sense described above, leading to simple explanations
+    for the effect of key predictors.
+2. Statistical validity: the model must describe the data adequately. ``All 
+models are wrong.  The practical question is whether a model is wrong enough to
+not be useful.'' George Box
+3. Numerical stability: the code to fit a model does not require hand-holding
+or fiddling with tuning parameters: it just runs.
+
+The transform $g$ gets chosen to fit criteria 3; if it helps with criteria 2 
+that is mostly luck.  (It nearly always impedes interpretability).
+
+## Fine-Gray: key idea
+For an ordinary 2 state Cox model:
+$$ 
+	P(death) = g(\beta_0(t) + \beta_1 x_1 + \beta_2 x_2 + \ldots)
+$$
+where $g$ = complementary log-log
+
+Assume that for outcome $k$
+$$
+ p_k(t)= g(\beta_{k0}(t) + \beta_{k1} x_1 + \beta_{k2} x_2 + \ldots)
+$$
+
+Issues
+- *how* to fit this (censored data)
+- is it a sensible model?
+
+
+## Transforms
+```{r, logit}
+x <- seq(-4, 4, length=101)
+logit <- function(x) exp(x)/(1 + exp(x))
+cloglog <- function(x) exp(-exp(1-x))
+matplot(x, cbind(logit(1.2*x), pnorm(x), cloglog(x+1.3)), type='l', 
+        lty=3:1, lwd=3, xlab="Risk score", ylab="P(fail)")
+legend(-4, .9, c("Logistic", "Probit", "Clog-log"), lty=3:1, lwd=2, 
+       col=1:3, bty='n')
+```
+
+## Example
+```{r, states}
+oldpar <- par(mar=c(1,1,1,1))
+cstate <- c("CU", "dementia", "death")
+cmat <- matrix(0, 3,3, dimnames=list(cstate, cstate))
+cmat[-3,3] <- cmat[1,2] <- 1
+statefig(c(1,2), cmat, cex=1.2)
+par(oldpar)
+```
+
+
+## Predictors of dementia and death
+- `r length(unique(data2$ptnum))` subjects
+- 726 dementia, 1990 deaths, 1/2 the dementias occur after active participation
+- Taken from the MCSA, an age/sex stratified random sample from Olmsted County, Minnesota
+- REP infrastructure
+- Covariates
+    * APOE e4 allele: risk factor for amyloidosis
+    * CMC score: 0-7, count of morbidities
+	
+---
+
+```{r, rateplot}
+d3 <- subset(d2, cstate=="ND")
+oyear <- with(d3,  age2-age1)   # interval length
+death0 <- glm((state=='death') ~ age1 + male + year1 +offset(log(oyear)), 
+             poisson, data=d3)
+death1 <-glm((state=='death') ~ ns(age1,3) + male + year1 +offset(log(oyear)), 
+             poisson, data=d3)
+death2 <- update(death1, . ~ . + male:age1)
+
+dement1 <- glm((state=="dementia") ~ ns(age1,3) + male +
+                     offset(log(oyear)), poisson, d3)
+dement2 <- glm((state=="dementia") ~ ns(age1,3)+ male + age1:male+  
+                     offset(log(oyear)), poisson, data=d3)
+
+# anova(death0, death1, death2, test="Chisq")
+# anova(dement1, dement2, test="Chisq")
+
+# no evidence for a sex by rate interaction
+
+dummy1 <- expand.grid(age1=60:95, male=0:1, year1=0, cmc=1, oyear=100)
+yhat1 <- matrix(predict(death0, newdata=dummy1, type='response'), ncol=2)
+yhat2 <- matrix(predict(dement1, newdata=dummy1, type='response'), ncol=2)
+
+oldpar <- par(mar=c(5,5,1,1))
+matplot(60:95, cbind(yhat1,yhat2), type='l', lty=c(2,2,1,1), col=1:2, log='y',
+        lwd=2, xlab="Age", ylab= "Events per per 100")
+legend("topleft", c("M death", "F death", "M dementia", "F dementia"),
+       col=2:1, lty=c(2,2,1,1), bty='n', lwd=2)
+#matlines(60:95, .95*survexp.mn[61:96,,"2013"]*36525, col="gray70", lty=3)
+
+par(oldpar)
+```
+
+## Multistate
+```{r}
+oldpar <- par(mar=c(1,1,1,1))
+statefig(c(1,2), cmat, cex=1.2)
+par(oldpar)
+```
+
+---
+
+```{r, coxfit0}
+cfit <-  coxph(list(Surv(age1, age2, state) ~ apoepos + male + cmc2 + edu4,
+                    1:2 ~ apoepos:male + year1),
+                    d2, id=clinic, istate=cstate)
+cfit0 <- coxph(Surv(age1, age2, state) ~ apoepos + male + cmc2 + edu4,
+                    d2, id=clinic, istate=cstate)
+temp <- summary(cfit0)$coef
+temp2 <- temp[,c(1,3)]
+temp3 <- exp(temp2[,1] + outer(temp2[,2], c(0, -1.96, 1.96), "*"))
+oldpar <- par(mar=c(5, 8, 1, 1))
+yy <- c(14:11, 9:6, 4:1)
+matplot(temp3, yy, log='x', type='n', xlab="Hazard ratio", 
+       ylab="", yaxt='n')
+
+points(temp3[,1], yy, pch=rep(15:17, c(4,4,4)), col=rep(1:3, c(4,4,4)))
+segments(temp3[,2], yy, temp3[,3], yy, col=rep(1:3,c(4,4,4)))
+abline(h=c(5, 10), lty=2)
+abline(v=1, lty=2)
+ylab <- rep(c("APOE+", "Male", "CMC(2)", "Educ(4)"), 3)
+axis(2, yy, ylab, las=2)
+text(c(1.7, 1.7, 1.6), c(1.5, 6.1, 11), 
+     c("dementia : death", "CU : death", "CU : dementia"))
+par(oldpar)
+```
+
+## Competing risks
+```{r, doublefig}
+oldpar <- par(mfrow=c(1,2), mar=c(1,1,1,1))
+statefig(1:2, cmat, cex=1.2)
+cmat2 <- cmat
+cmat2[2,3] <- 0
+temp<- c("CU","dementia\n before death", "death before\ndementia")
+dimnames(cmat2) <- list(temp, temp)
+statefig(1:2,cmat2)
+par(oldpar)
+```
+
+---
+
+```{r, coxfit2}
+# for a competing risks plot, don't let them progress
+data3 <- subset(d2, cstate== "ND")
+cfit0b <- coxph(Surv(age1, age2, state) ~ apoepos + male + cmc + edu4,
+                   data3, id=clinic)
+
+dummy <- expand.grid(male =0:1, apoepos =0:1, cmc= c(1,3), edu4=c(3, 4))
+surv2 <- survfit(cfit0b, newdata= dummy, start.time=60, p0=c(1,0,0))
+oldpar <- par(mfrow=c(2,2), mar=c(5,5,1,1))
+plot(surv2[1:4,2], col=1:2, lty=c(2,2,1,1), lwd=2, xmax=100, 
+     xlab="Age", ylab="P(Ever dementia)")
+legend(60, .45, c("Female+", "Male+", "Female-", "Male-"), col=1:2, 
+       lty=c(1,1,2,2), lwd=2, bty='n')
+text(95, .05, "CMC=1\neduc=12")
+plot(surv2[5:8,2], col=1:2, lty=c(2,2,1,1), lwd=2, xmax=100, 
+     xlab="Age", ylab="P(Ever dementia)")
+text(95, .05, "CMC=3\neduc=12")
+
+plot(surv2[1:4,3], col=c(1,2,1,2), lty=c(2,2,1,1), lwd=2, xmax=100,
+     xlab="Age", ylab="P(death w/o dementia)", ylim=c(0, .7))
+legend(60, .55, c("Female+", "Male+", "Female-", "Male-"), col=1:2, 
+       lty=c(1,1,2,2), lwd=2, bty='n')
+text(95, .05, "CMC=1\nEduc=12")
+plot(surv2[5:8,3], col=1:2, lty=c(2,2,1,1), 
+     lwd=2, xmax=100, xlab="Age", ylab="P(death w/o dementia)")
+text(95, .05, "CMC=3\nEduc=12")
+par(oldpar)
+```
+
+## Fine-Gray
+- The effect of sex on P(dementia) depends on the levels of all the other 
+covariates, and on time.
+- There is no single p-value. 
+-
+- Model the two outcomes directly:
+   * P(dementia before death) = $g(\beta_0(t) + X\beta)$ 
+   * P(death before dementia) = $g(\alpha_0(t) + X\alpha)$
+   * $g$ = the complimentary log log
+- Technical challenge.
+   * Treating survival as binomial
+
+
+## Geskus' formulation
+> - Create a special data set for each outcome.
+    * Subjects who are censored persist, but with diminished case weights.
+    * Weights decrease based on $F(t)$ and $G(t)$.
+> - (You can't have time-dependent covariates.)
+> - Apply an ordinary Cox model program to the new data set.
+- Advantage: all the Cox model checks are available.
+> - For the dementia dataset, subjects who die also persist, but with diminished
+case weights.
+
+## Geskus
+```{r, geskus, echo=TRUE}
+fdata1 <- finegray(Surv(age1, age2, state) ~., data=data3, 
+                   id= clinic, etype= "dementia")
+fdata2 <- finegray(Surv(age1, age2, state) ~., data=data3, 
+                   id= clinic, etype= "death")
+#
+rbind(data3 = dim(data3), fdata1 = dim(fdata1), fdata2= dim(fdata2))
+
+fcox1 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ apoepos + 
+                male + cmc + edu4, weight = fgwt, fdata1)
+fcox2 <- coxph(Surv(fgstart, fgstop, fgstatus) ~ apoepos + 
+                male + cmc + edu4, weight = fgwt, fdata2)
+```
+
+---
+
+```{r, geskus2}
+temp <- rbind("multi, CU:dementia" = coef(cfit0)[1:4],
+               "multi, CU:death" = coef(cfit0)[5:8],
+              "FG, dementia before death" = coef(fcox1), 
+              "FG, death before dementia" = coef(fcox2))
+colnames(temp) <- names(coef(fcox2))
+round(temp,3)
+
+cat("cox.zph on fcox1\n")
+zp <- cox.zph(fcox1, transform= "identity")
+zp
+``` 
+
+## How well does it work?
+- If cause 2 has low prevalence ($<1/4$) and/or cause 2 has no strong
+covariates, then all is well for the cause 1 model
+   * Coefficients for outcome 1 hardly change from the Cox model
+   * The predicted curves have the same shape, but are attenuated
+- Examples
+   * Revision after hip fracture
+   * Epidemic
+
+## Otherwise
+1. The model often does not fit very well.  It fails our 'good enough' criteria.
+2. There is no physical system that satisfies the FG model.
+3. Users interpret coefficients as though it were a Cox model, and it is not.
+4. It encourages bad science: most examples (and users) fit only one of the endpoints, ignoring the other.
+5. If there are moderately strong covariates, and $>80$\% reach 
+one of the two endpoints, it is common to have $\hat P$(dementia before death) + $\hat P$(death before dementia) $> 1$
+for high risk subjects.
+6. In the guts of the code, people who die are still at risk for
+dementia.
+
+## What to do?
+1. Intentionally report both hazards and absolute risk
+   - Biology + the consequences of that biology
+   - A two number summary of (APOE hazard, APOE risk), true for all time, 
+for all combinations of other covariates, is an impossible dream.
+   - For absolute risk, choose 1 (or 2) timepoints of interest.
+   - Use pseudovalues or marginal estimates for those time points.
+2. Marginal estimates
+   - If APOE is the variable of interest, average over the others
+       * dummy data set with $n$ rows, everyone APOE-
+       * get all $n$ predicted curves, take the average
+       * repeat for APOE+
+   - g-estimation
+3. Pseudovalues
+   - From the appropriate KM or Aalen-Johansen (CI) curve
+   - Select one or more time points, and create the matrix of *pseudovalues*
+   - Essentially, the influence of each observation on $p(t)$
+   - Use these in a regression model
+
+---
+
+```{r, pseudo, echo= TRUE}
+ajfit <- survfit(Surv(age1, age2, state) ~ 1, id = clinic, 
+                 data=data3, start.time = 65)
+pdat <- pseudo(ajfit, times= c(70, 80, 90, 100))
+dim(pdat)
+d100 <- pdat[,4,2]  # influence on dementia at age 100
+
+# data with one obs per subject
+base <- subset(data3, !duplicated(clinic))
+pfit1 <- glm(d100 ~ apoepos + male + cmc +edu4, base,
+            family= gaussian(link = blogit()))
+pfit2 <- glm(d100 ~ apoepos + male + cmc +edu4, base,
+            family= gaussian(link = bcloglog()))
+```
+
+---
+
+```{r, psplot}
+plot(ajfit, noplot="", col=c(1,3,2), lwd=2,  xmax=100,
+     ylab="P(state)")
+text(c(70, 95, 98), c(.88, .68, .37), c("CU", "death", "dementia"), 
+     col=1:3)
+```
+
+---
+
+```{r, pseudo2}
+temp <- rbind("pseudo, logit" = pfit1$coef, 
+              "pseudo, cloglog" = pfit2$coef,
+              "FineGray, dem" = c(NA, coef(fcox1)),
+              "multistate HR"  = c(NA, cfit0$coef[1:4]))
+print(round(temp,2), na.print="")
+```
+
+## Multiple time points
+- For multiple time points at once: 
+    * A bit more work to set up.
+    * Add `factor(time)` to the fit: one intercept per time point.
+    * Robust variance is necessary, fit using GEE instead of glm.
+- Closely related to ordinal logistic regression
+- With many time points, result will approach the FG 
+   * Coefficients will be nearly identical, se a small bit larger
+   * Adding time*covariate interactions is a test for 'proportional cloglog'
+   * A good way to more deeply understand the Fine Gray model
+
+
+## Final
+- Multi-state models are important
+    * No one outcome is dominant
+    * Want to understand the trajectory of disease
+    * Both rates and outcomes are necessary summaries
+- We like additive models.
+- Additive on hazard scale $\ne$ additive on absolute risk scale
+- FG was an early attempt to address this.  Credible at the time, but has
+not aged well.
+- It works when you don't need it, and fails when you do.
+
+---
+
+```{r, lastplot}
+dummy0 <- expand.grid(apoepos=0:1, male=0:1, cmc2= 1, cmc=2, edu4= 4)
+csurv <- survfit(cfit0, newdata=dummy0, start.time=65)
+
+plot(csurv[,2], col=c(1,1,2,2), lty=1:2, lwd=2, xmax=100,
+     xlab="Age", ylab="P(dementia)")
+legend(65, .1, c("Female", "Male"), col=1:2, lwd=2, bty='n')
+text(c(80, 89), c(.08, .035), c("APOE+", "APOE-"))
+```
+
+---
+
+```{r, last2}
+surv2a <- survfit(cfit0b, newdata=dummy0, start.time=65, p0=c(1,0,0))
+surv2b <- survfit(cfit0b, newdata=dummy0, start.time=80, p0=c(1,0,0))
+plot(surv2a[1:4,2], lty=1:2, col=c(1,1,2,2), lwd=2, xlab="Age",
+     ylab= "Dementia before death", xmax=100)
+lines(surv2b[1:4, 2], col=c(3,4,3,4), lwd=2, lty=c(1,1,2,2))
+legend(75, .4, c("Male +", "Female +", "Male -", "Female -"),
+       col=c(1,2,1,2), lty=c(2,2,1,1), bty='n', lwd=2)
+```

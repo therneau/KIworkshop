@@ -1,0 +1,951 @@
+\documentclass{article}[11pt]
+\usepackage{amsmath}
+\addtolength{\textwidth}{1in}
+\addtolength{\oddsidemargin}{-.5in}
+\setlength{\evensidemargin}{\oddsidemargin}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\title{Competing Risks}
+\author{Terry Therneau}
+\date{19 Sept 2023}
+
+\begin{document}
+\maketitle
+<<setup, echo=FALSE>>=
+library(knitr)
+opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
+               fig.width=4.5, fig.height=3, fig.path="figures/",
+               device="pdf", dev.args=list(pointsize=8),
+               cache=FALSE,   background="#ffffff",
+               warning=FALSE, error=FALSE, message=FALSE, prompt=TRUE,
+               strip.white=FALSE, mymar=TRUE)
+options(contrasts= c("contr.treatment", "contr.poly"),
+        show.signif.stars = FALSE, continue=" ", width=65)
+
+# because "mymar" is set to TRUE above, this hook will be run on every chunk.
+# it sets the margins, font, etc to values that work
+knit_hooks$set(mymar= function(before, options, envir) {
+    if (before) {
+        look.for <- c("mar", "font", "cex")  # options we want
+        plist <- options[match(look.for, names(options), nomatch=0)]
+        if (is.null(plist$mar)) plist$mar <- c(4, 4, .5, .5)
+        if (is.null(plist$cex)) plist$cex <- 1
+        do.call("par", plist)
+    } else NULL
+})
+ 
+table2 <- function(...) table(..., useNA = "ifany")
+library(survival)
+library(splines)
+@
+
+
+\section{Introduction}
+Figure \ref{sfig1} shows 4 multistate models.  This chapter deals with
+the one in upper right, competing risks.  
+Everyone starts in the same state, that there are multiple
+possible transitions from that state, but each subject only experiences one
+of them.
+\begin{figure}
+<<sfig1, echo=FALSE>>=
+oldpar <- par(usr=c(0,100,0,100), mar=c(.1, .1, .1, .1), mfrow=c(2,2))
+# first figure
+states <- c("Alive","Dead")
+connect <- matrix(0,nrow=2,ncol=2, dimnames=list(states,states))
+connect[1,2] <- 1
+statefig(layout= matrix(2,1,1), connect)
+
+# second
+states <- c("0", "1", "2", "...")
+connect <- matrix(0L, 4, 4, dimnames=list(states, states))
+connect[1,2] <- connect[2,3] <- 1
+connect[3,4] <- 1
+statefig(matrix(4,1,1), connect)
+
+# third figure
+states <- c("A","D1","D2","D3")
+connect <- matrix(0,nrow=4,ncol=4, dimnames=list(states,states))
+connect[1,2:4] <- 1
+statefig(layout=c(1,3), connect)
+
+# fourth figure
+states <- c("Health","Illness","Death")
+connect <- matrix(0,nrow=3,ncol=3, dimnames=list(states,states))
+connect[1,2] <- 1
+connect[2,1] <- 1
+connect[,3]  <- 1  # all connect to death
+statefig(layout=c(1,2), connect, offset=.02)
+
+par(oldpar)
+@
+  \caption{Four multistate models.  The upper left panel depicts
+  simple survival, the upper right panel depicts sequential events,
+ the lower left panel illustrates competing risks,  
+ and the lower right panel shows a multistate illness-death model.}
+ \label{sfig1}
+\end{figure}
+
+In R the coding for competing risks is quite simple. The final state is a
+factor variable whose first level corresponds to censored observations, and
+remaining levels are the possible endpoints.  
+An id variable is required, even if a subject has only one line of data.
+Otherwise this looks exactly like the data set for an ordinary Cox model.
+
+This is my own big picture view of this portion.
+\begin{itemize}
+  \item Setup
+    \begin{itemize}
+      \item Creating the multi-state data set, used for the Aalen-Johansen
+        estimate and for the mulitstate hazards model, is essentially the same
+        as other multistate cases.  (Though it is one of the simpler cases.)
+      \item Check the data
+      \item Simple statistics include counts, rates, and AJ estimate.  Start 
+        there.
+    \end{itemize}
+  \item Key measures of importance are hazard ratios, $p(t)$ and mean time in
+    state for each outcome. Do at least 2.
+  \item An additive model for any one $\ne$ additive for another.  A large 
+    coefficient in one $\ne$ a large coefficient in another.
+    \begin{itemize}
+      \item Users want an additive model of course -- which ones work?  How do
+        you fit them?
+      \item Population marginal means (PMM) are a strong alternative (PMM has
+        many names).
+    \end{itemize}
+    \item Don't forget to check assumptions.
+\end{itemize}    
+
+\section{Aalen-Johansen estimator}
+Let $\lambda_{jk}$ be the empirical hazard estimator, the number of observed
+transitions from state $j$ to $k$ at time $t$ divided by the number who were
+at risk of such a transition.
+\begin{align*}
+\lambda_{jk}(t) &= \frac{dN_{jk}(t)}{Y_j(t)} \\
+N_{jk}(t) &= \sum_i N_{ijk}(t) \\
+Y_{j}(t)  &= \sum_i Y_{ij}(t)
+\end{align*}
+
+Let $A$ be a matrix of the estimates, i.e., with $A_{jk} = \lambda_{jk}$ for
+all $j \ne k$.  
+(It would be natural to use $\Lambda$ for the matrix, but that symbol has been
+widely used for the cumulative hazard, so it is already taken.)
+The diagonal of $A$ is then filled in such that each row sums to 0.
+Let $H = I + A$ be the similar matrix but with rows that each sum to 1.
+Each row of $H$ describes what happened at time $t$: the diagonal contains the
+fraction of observations in each state who ``stayed home'' at time $t$ 
+and the off diagonal the fractions who moved to another state.  
+For any state $j$ with no members at time $t$ the convention is to set that row
+of $A$ to zero.  
+
+The Aalen-Johansen estimate of the probability in state is
+$$
+ \hat p(t) = p(0) \prod_{s \le t} H(s)
+$$
+
+The starting vector $p(0)$ is very often (1, 0, 0, \ldots), e.g., everyone 
+starts in the enrolled state.
+
+A special case of the AJ estimate is when there are only two states and one
+transition, e.g., alive $\longrightarrow$ dead.  Let $d(t)$ and $n(t)$ be
+the number of deaths and the number at risk at each time.  Then 
+\begin{equation*}
+ H(t) = \left( \begin{array}{cc} \frac{n(t)- d(t)}{n(t)} & \frac{d(t)}{n(t)} \\
+   0 & 1  \end{array} \right)
+\end{equation*}
+The second row of the matrix encodes the fact that death is an absorbing state.
+Simple matrix multiplication shows that 
+\begin{align*}
+p_1(t) &= \prod_{s\le t} \frac{n(t)- d(t)}{n(t)}
+p_2(t) &= 1- p_1(t)
+\end{align*}
+which we immediately recognize as the Kapan-Meier.  That is, the KM is a 
+special case of the AG.
+
+In the survival package, we have 
+<<echo=TRUE, eval=FALSE>>=
+sfit1 <- survfit(Surv(time, event) ~ group, data=mydata, id=ptnum,
+                 istate= cstate)
+sfit2 <- survfit(Surv(time1, time2, event) ~ group, data=mydata, id=ptnum,
+                 istate= cstate)
+@ 
+\begin{itemize}
+  \item The second form is used if there is delayed entry.  Use with a time
+    dependent \code{group} is invalid.
+  \item The KM is computed if the \code{event} variable is 0/1 or TRUE/FALSE,
+    and the AJ if it is a factor.  In the second case the first level of
+    the factor is required to encode ``no event at this time'' for the subject,
+    e.g. censoring.  The labels of the factor levels are the user's choice.
+  \item For the AG the \code{id} statement is mandatory, it names a variable
+    which labels which rows of the data set belong to which subject.
+  \item The \code{istate} variable is optional, if missing the code assumes
+    that all subjects start in the same state, which will be labeled ``(s0)''
+    in the output.  Not everyone need start in the same state.
+\end{itemize}
+
+An alternate to the AJ is the exponential product
+\begin{equation*}
+\hat p(t) = p(0) \prod_{s \le t} e^{A(s)}
+\end{equation*}
+
+
+\section{Free light chain}
+The \code{flchain} data set in the survival package is a stratified sample
+containing 1/2 of the subjects
+from a study of the relationship between serum free light chain
+(FLC) and mortality.  The original sample contains samples on
+approximately 2/3 of the residents of Olmsted County aged 50 or greater.
+Plasma cells each create a unique immunoglobulin that is constructed from
+a light chain and heavy chain portion.
+For unclear reasons, the cellular machinery produces an excess of light chain,
+which is excreted into the blood and cleared by the kidneys.
+
+\begin{figure}
+<<flc0>>=
+flc <- flchain$kappa + flchain$lambda
+hist(pmin(flc,10), nclass=50, main=NULL, xlab="Free light chain")
+abline(v=quantile(flc, c(.9,.95)), col=2)
+@ 
+  \caption{Free light chain quantiity for the 7874 study subjects,
+    along with the 90th and 95th percentiles.}
+  \label{flc0}
+\end{figure}
+
+\begin{figure}
+<<flc1>>=
+oldpar <- par(mfrow=c(1,2))
+fsurv0 <- survfit(Surv(futime, death) ~ sex, flchain)
+plot(fsurv0, col=1:2, xscale= 365.25, fun="event", lwd=2,
+     xlab="Years from sample", ylab="Death")
+legend(6*365, .1, c("Male", "Female"), lty=1, lwd=2, col=1:2, bty='n')
+
+plot(fsurv0, col=1:2, xscale= 30.5, fun="event", lwd=2,xmax= 18* 30.5,
+     xlab="Months from sample", ylab="Death")
+abline(v=30, lty=3)
+par(oldpar)
+@
+  \caption{Overall survival for the FLC study, along with zoom in on
+    the first 18 months. The dotted line is at 30 days.}
+  \label{flc1}
+\end{figure}
+
+Figure \ref{flc1} shows the overall survival for the FLC study, along with a
+blowup of the first 1.5 years.  We see an increased mortality for the first
+month; it is about 8 months before the usual male/female divergence.  
+The entry criteria for the study was any Olmsted County resident age 50 or
+older, not yet sampled, who had blood work done that results in excess sera.
+Many of these people are getting simple checkups, but a subset will of course
+be very ill. One can argue that the group of interest, with respect to a useful
+prediction of future mortality, are those with $>30$ days of follow-up. 
+
+The next lines show the distribution of cause of death, using the chapter
+heading of the ICD codes.  For this example, we will collapse all but the top 2
+into a single category of ``other''.
+
+<<flc2>>=
+flc2 <- subset(flchain, futime > 30)
+flc2$id <- 1:nrow(flc2)
+flc2$years <- flc2$futime/365.25
+flc2$flc10 <- 1*(flc2$flc.grp==10)
+flc2$creat <- flc2$creatinine  # shorter label
+temp <- with(flc2, ifelse(is.na(chapter), 0, 1+ 
+                          1*(chapter=="Circulatory") + 2*(chapter=="Neoplasms")))
+flc2$dtype = factor(temp, c(0, 2,3,1), 
+                    c("censor", "cardiac", "cancer", "other"))
+with(flc2, table2(chapter, dtype))
+cat('\n')
+survcheck(Surv(futime, dtype) ~ 1, flc2, id=id)
+@ 
+
+Figures \ref{flc3} and \ref{flc4} show the results of an Aalen-Johansen
+estimate $p(t)$.  The result, at each time point, is a vector of the
+estimated probability of being in each state.
+By definition the sum over states has to be 1, $\sum p_k(t) =1$. 
+It is thus not necessary to show all 4 curves and it is common to omit
+the least interesting of them as in figure \ref{flc5}. 
+
+\begin{figure}
+<<flc3>>=
+aj1 <- survfit(Surv(years, dtype) ~ 1, flc2, id=id, influence=TRUE)
+plot(aj1, lty=1, noplot='', col=c(4,1,2,3), lwd=2, xlab="Years", 
+     ylab="P(state)")
+
+states <- c("Alive", "Cardiac", "Cancer", "Other")
+smat <- matrix(0, 4, 4, dimnames=list(states, states))
+smat[1, 2:4] <- 1
+oldpar <- par(new=TRUE, mar=c(9,8,9,10))
+statefig(c(1,3), smat, col=c(4, 1:3))
+par(oldpar)
+@
+  \caption{Aalen-Johansen estimates of probability in state, for the 4 states.}
+  \label{flc3}
+\end{figure}
+
+\begin{figure}
+<<flc4>>=
+plot(aj1, lty=1, col=1:3, lwd=2, xlab="Years", ylab= "P(state)")
+@ 
+  \caption{Aalen-Johansen estimates, omitting the alive state.}
+  \label{flc4}
+\end{figure}
+
+One useful estimate is the sojourn time or restricted mean time in state (RMST).
+For a two state alive:dead model (simple survival) a more common label for
+time in the alive state is restricted mean survival time (RMST).
+For competing risks, the sojourn time in the non-initial state is sometimes
+called the years of life lost (YLL), in this case .34 of the first 10 years 
+after the FLC assay is lost to cancer.
+
+<<flc4b, echo=TRUE>>=
+print(aj1, rmean=10, digits=2)
+@ 
+
+When there are multiple covariates the set of curves can get a bit
+large, for example create curves by sex, flc10, and quartiles of age.
+
+<<flc4c, echo=TRUE>>=
+agegrp <- cut(flc2$age, c(0, 55, 63, 72, 100))
+flcmany <- survfit(Surv(years, dtype) ~ agegrp + sex + flc10, flc2, id=id)
+dim(flcmany)
+print(flcmany[,2], digits=2, rmean=10)
+@ 
+
+The multi-state hazard model is simple to fit using \code{coxph}.
+The result is a set of coefficients for each transition.
+
+<<flc5, echo=TRUE>>=
+cfit <- coxph(Surv(years, dtype) ~ age + sex + log(creat) + flc10, 
+              flc2, id=id)
+print(cfit, digits=2)
+@ 
+
+Notice that the coefficients we get for cardiac are exactly what come from a 
+simple Cox model using cardiac death as an end point with all other outcomes
+treated as censored.  Hazards can be computed one at a time.  However, as
+shown in figure \ref{flc6}, absolute risk (survival) can not be computed
+in this way, using the Kaplan-Meier. 
+Doing so is a common and fundamental mistake.
+
+<<flc5b, echo=TRUE>>=
+ctest <- coxph(Surv(years, dtype=="cardiac") ~ age + sex + log(creat) + flc10,
+               flc2)
+print(ctest, digits=2)
+@ 
+
+\begin{figure}
+<<flc6>>=
+badfit <- survfit(Surv(years, dtype=="cardiac") ~ 1, flc2)
+plot(aj1, col=1:3, lwd=2, xlab="Years from FLC test", ylab="P(state)")
+lines(badfit, fun='event',  conf.int=FALSE,col=1, lty=2, lwd=2)
+legend(0, .12, c("Cardiac", "Cancer", "Other", "KM cardiac"),
+       col=c(1:3, 1), lty=c(1,1,1,2), lwd=2)
+@ 
+  \caption{Aalen-Johansen estimates for the FLC data (solid) along with
+    a KM for the cardiac endpoint (dashed).}
+  \label{flc6}
+\end{figure}
+
+Here is a test for proportional hazards.
+We see a smattering of small p, of which age:other is the strongest.
+Figure \ref{flc8} shows the associated plots for the two smallest.
+
+<<flc7>>=
+zp <- cox.zph(cfit, transform="identity")
+zp
+@ 
+
+\begin{figure}
+<<flc8>>=
+oldpar <- par(mfrow=c(2,2))
+plot(zp[9], resid=FALSE, ylim=c(0, .18), ylab= "Beta(t) for age:other death")
+abline(h=cfit$coef[9], lty=3, col=2)
+
+plot(zp[11], resid=FALSE, ylab= "Beta(t) for creatinine: other death")
+abline(h=cfit$coef[11], lty=3, col=2)
+
+temp1  <-survfit(Surv(years, dtype) ~ cut(age, c(0, 60, 70, 100)), flc2, id=id)
+plot(temp1[,4], col=1:3,lwd=2, xlab="Years since FLC", ylab="Other death")
+legend(1, .29, c("<=60", "60-70", ">70"), lty=1, lwd=2, col=1:3, bty='n')
+
+temp2  <-survfit(Surv(years, dtype) ~ cut(creatinine, c(0, .9, 1.2, 11)),
+                          flc2, id=id)
+plot(temp2[,4], col=1:3,lwd=2, xlab="Years since FLC", ylab="Other death")
+legend(0, .18, c("<=.9", ".9-1.2", ">1.2"), lty=1, lwd=2, col=1:3, bty='n')
+par(oldpar)
+@ 
+  \caption{Estimates of time-dependent $\beta(t)$ for two covariates,
+    other death endpoint.  Dotted line is the Cox model coefficient.}
+  \label{flc8}
+\end{figure}
+
+\subsection{Predicted survival}
+Predictions from a single state or multi-state PH model are available for
+any given values of the $X$ variables.  The challenge, of course, is which
+$X$ values to use as a good summary.  Here is an example
+
+<<pox1, echo=TRUE>>=
+dummy <- expand.grid(age= c(55, 63, 72), sex=c("F", "M"), creat=1, flc10=0:1)
+psurv <- survfit(cfit, newdata=dummy)
+dim(psurv)
+print(psurv[,2], rmean=10)
+@
+
+<<pcox1b>>=
+# not echo of my clumsy code
+temp1 <- summary(psurv[,2], rmean=10)$table
+temp2 <- cbind(dummy[1:6,1:2], "RMTS:low FLC"= temp1[1:6, 3], 
+               "RMTS:high FLC" = temp1[7:12, 3], 
+               delta= temp1[7:12, 3]-temp1[1:6, 3])
+temp2
+
+@ 
+This has created 48 curves, 12 for each state.
+To look at the effect of high FLC on cardiac death, we might show this as 6 
+pairs, using line types and colors.
+
+\begin{figure}
+<<flc9>>=
+plot(psurv[,2], lwd=1, col=1:6, lty=c(1,1,1,1,1,1,2,2,2,2,2,2),
+     xlab="Years from FLC", ylab="Cardiac death")
+temp <- summary(psurv, time=14)$pstate[,,2]
+temp <- temp[7:12] - temp[1:6]
+label <- paste(dummy$age[1:6], dummy$sex[1:6], format(round(temp,3)))
+legend(.5, .2, label, col=1:6, lwd=2)
+@ 
+  \caption{Curves for FLC in the lower 90\% (solid) versus the upper 10\%
+    (dashed), for 6 combinations of age and sex (colors).}
+  \label{flc9}
+\end{figure}
+
+Can we get a single number summary for the YLL due to FLC?
+
+\subsection{The Aalen-Johansen estimate, again}
+<<ajsetup>>=
+# some computations needed for the next paragraph
+ii <- which(rowSums(aj1$n.event) > 3)  # times with multiple events
+ii <- ii[4] # arbitrarily talk about this time point
+days <- round(aj1$time[ii] * 365.25)  #avoid round off error
+ecount <- table(flc2$dtype[flc2$futime <= days])
+@ 
+
+At any time point $t$ create the transition matrix $H$.  The first row of
+$H$ is the dispostion of all those in state 1 at time $t-0$, the second row
+all those in state 2, etc.  
+As an example, for the flc2 data set above at \Sexpr{days} days we have
+(\Sexpr{paste(c(aj1$n.risk[ii,1], ecount[-1]), collapse= ', ')}) subeject
+currently in the entry, cardiac death, cancer death, and other death
+states (\Sexpr{ecount[1]} have been censored before day \Sexpr{days}),
+There were 2 cardiac deaths and 2 other deaths on that day, leading to
+
+\begin{equation*}
+H(1874) = \left( \begin{array}{cccc}
+   6706/6710 & 2/6710 & 0 & 2/6710 \\
+   0 & 1 & 0 & 0 \\
+   0 & 0 & 1 & 0 \\
+   0 & 0 & 0 & 1 \end{array} \right)
+\end{equation*}
+
+The AJ estimate at time t is 
+$$ \hat p(t) = p(0) \prod_{s/le t} H(s) $$
+
+For simplicity label the states as 0= entry, 1= cardiac death, 2= cancer death
+and 3 = other death.  Then $p(0) = (1, 0, 0, 0)$, and it is fairly easy to show
+that 
+\begin{align*}
+  p_0(t) &= S(t) \\
+  p_1(t) &= \int_0^t \lambda_{01}(z) S(z-) dz \\
+  p_2(t) &= \int_0^t \lambda_{02}(z) S(z-) dz \\
+  p_3(t) &= \int_0^t \lambda_{03}(z) S(z-) dz 
+\end{align*}
+where $S(t)$ is the usual Kapan-Meir for death of any type and $\lambda_{jk}$ are
+element of the $H$ matrix above.  
+Many will recognize this as the ``cumulative incidence'' (CI) formula.
+That is, the CI is a special case of the Aalen-Johansen.
+
+When you use the KM, incorrectly, one essentially replaces the first row
+by (6708/6710, 2/6710, 0, 0).  
+
+Let $H = I + A$, i.e., the diagonal of $A$ is set so that each row sums to zero.
+An alternate estimate is
+$$ p(t) = p(0) \prod_{s\le t} e^{A(s)}$$
+where exp is the matrix exponential, defined as
+$$\exp(A) = I + A + A^2/2! + A^3/3! + \ldots $$
+
+Many textbooks will contain a formula where the Kaplan-Meier is replaced by
+the exponential of the cumulative hazard, 
+$S^\dagger(t) = \exp(\sum_{s /le t} A_{00}(t)$, usually written in terms of 
+$\lambda$.  
+This leads to an estimate which does not satisfy $\sum_k p_k(t) =1$.   
+
+\section{Death and dementia in the MCSA}
+(A copy of this data set is not provided).
+<<setup2>>=
+data2 <- readRDS("data/data2.rds")  # from the long-term follow-up study
+data2$year1 <- 1*(data2$year==0)
+# collapse, for simpler presentation
+d2 <- survcondense(Surv(age1, age2, state) ~ male + educ + apoepos + icmc + 
+                          cstate + year1, data2, id= clinic)
+d2$edu4 <- pmax(d2$educ, 8)/4
+d2$cmc2 <- d2$icmc/2
+d2$cmc  <- d2$icmc
+@ 
+
+Mayo Clinic Study of Aging
+\begin{itemize}
+  \item \Sexpr{ length(unique(data2$ptnum))} subjects
+  \item  726 dementia, 1990 deaths, 1/2 the dementias occur after 
+    active participation
+  \item Taken from the MCSA, an age/sex stratified random sample from 
+    Olmsted County, Minnesota
+  \item Covariates
+    \begin{itemize}
+      \item APOE e4 allele: risk factor for amyloidosis
+      \item CMC score: 0-7, count of morbidities
+      \item Education
+    \end{itemize}
+\end{itemize}
+
+\begin{figure}
+<<rateplot>>=
+d3 <- subset(d2, cstate=="ND")
+oyear <- with(d3,  age2-age1)   # interval length
+death0 <- glm((state=='death') ~ age1 + male + year1 +offset(log(oyear)), 
+             poisson, data=d3)
+death1 <-glm((state=='death') ~ ns(age1,3) + male + year1 +offset(log(oyear)), 
+             poisson, data=d3)
+death2 <- update(death1, . ~ . + male:age1)
+
+dement1 <- glm((state=="dementia") ~ ns(age1,3) + male +
+                     offset(log(oyear)), poisson, d3)
+dement2 <- glm((state=="dementia") ~ ns(age1,3)+ male + age1:male+  
+                     offset(log(oyear)), poisson, data=d3)
+
+# anova(death0, death1, death2, test="Chisq")
+# anova(dement1, dement2, test="Chisq")
+
+# no evidence for a sex by rate interaction
+
+dummy1 <- expand.grid(age1=60:95, male=0:1, year1=0, cmc=1, oyear=100)
+yhat1 <- matrix(predict(death0, newdata=dummy1, type='response'), ncol=2)
+yhat2 <- matrix(predict(dement1, newdata=dummy1, type='response'), ncol=2)
+
+oldpar <- par(mar=c(5,5,1,1))
+matplot(60:95, cbind(yhat1,yhat2), type='l', lty=c(2,2,1,1), col=1:2, log='y',
+        lwd=2, xlab="Age", ylab= "Events per per 100")
+legend("topleft", c("M death", "F death", "M dementia", "F dementia"),
+       col=2:1, lty=c(2,2,1,1), bty='n', lwd=2)
+#matlines(60:95, .95*survexp.mn[61:96,,"2013"]*36525, col="gray70", lty=3)
+par(oldpar)
+@
+ \caption{Overall rates of death and dementia, by age, in the MCSA.}
+ \label{rateplot}
+\end{figure}
+
+Figure \ref{rateplot} shows the death and dementia rates as a function of age.
+The dementia rate is not loglinear!
+
+
+\section{The special role of age}
+
+\begin{figure}
+<<agefig1>>=
+yy <- 365.25 * survexp.us[41:101,, "2010"]
+matplot(40:100, yy*1000, log='y',type='l', col=1, lty=1:2,
+        xlab="Age", ylab="Deaths per 1000")
+legend(80, 15, c("Male", "Female"), lty=1:2, col=1, bty='n')
+
+tdata <- data.frame(rate= c(yy), male= (0:1)[col(yy)], age= (40:100)[row(yy)])
+pfit <- glm(rate ~ male + age, data=tdata, family= quasipoisson)
+@ 
+  \caption{Death rates per 1000, United States 2010.}
+  \label{agefig1}
+\end{figure}
+
+When working with human subjects data, as the authors do, age and sex
+appear as covariates in nearly every model.
+Figure \ref{agefig1} shows overall US death rates as a function of age and sex.
+It displays the remarkable fact that, over the interval from age 40 to 100,
+rates closely align to the very simple model
+log(rate) = a + b*age + c* male. 
+The same is true for other populations than the US total.
+The great majority of our clinical
+research falls into this age range; most studies will span only a portion
+of it, in which case the model fits even better.
+
+
+\begin{figure}
+<<agefig2>>=
+current <- function(futime, death, age, sex) {
+    # age is entry age, create a current age variable, and use it in
+    #  the regression
+    tdata <- data.frame(time=futime, status= death, age=age, sex=sex)
+    adata <- survSplit(Surv(time, status) ~ ., data=tdata, cut= 1:80)
+    adata$cage <- adata$age + adata$tstart   # current age
+    fit0 <- coxph(Surv(tstart, time, status) ~ age*sex, adata)
+    fita <- coxph(Surv(tstart, time, status) ~ sex * ns(cage, df=3), adata)
+    list(fit0=fit0, fita=fita)
+}
+fit1 <- with(mgus2, current(futime/12, death, age, sex))
+dummy <- expand.grid(cage = 50:95, sex=c("F", "M"))
+p1 <- matrix(predict(fit1[[2]], newdata=dummy), ncol=2)
+
+fit2 <- with(nafld1, current(futime/12, status, age, male))
+dummy2 <- expand.grid(cage=50:95, sex=0:1)
+p2 <- matrix(predict(fit2[[2]], newdata=dummy2), ncol=2)
+
+fit3 <- with(subset(flchain, futime > 7), 
+             current(futime/365.25, death, age, sex))
+dummy3 <- expand.grid(cage=50:95, sex=c("F", "M"))
+p3 <- matrix(predict(fit3[[2]], newdata=dummy3), ncol=2)
+
+rfile <- "data/Rush_FH_150916.csv"
+rush <- read.csv(rfile, na.strings='.', stringsAsFactors=FALSE)
+rush$sex <- factor(rush$sex, 2:1, c("female", "male"))
+rush$study <- factor(rush$study, 1:3, c("MAP", "MARS", "ROS"))
+names(rush)[1] <- "id"  # I get tired of typing the long id name
+rdata <- subset(rush, (!duplicated(id, fromLast=TRUE) & study=="MAP"),
+                c(id, age_bl, sex, died, lag, age_death))
+rdata$futime <- with(rdata, ifelse(died, age_death- age_bl, lag))
+fit4 <- with(subset(rdata, futime>0), current(futime, died, age_bl, sex))
+
+dummy4 <- expand.grid(cage=65:95, sex=c("female", "male"))
+p4 <- matrix(predict(fit4[[2]], newdata=dummy4), ncol=2)
+
+oldpar <- par(mfrow=c(2,2), mar=c(5.1, 5.1, 1, 1))
+#
+matplot(50:95, exp(p2), type='l', log='y', lty=1,
+        xlab="Current age", ylab="Hazard ratio")
+text(60, 1, "FLC")
+
+matplot(50:95, exp(p1), type='l', log='y', lty=1,
+        xlab="Current age", ylab="Hazard ratio")
+text(60, 2, "MGUS")
+
+matplot(50:95, exp(p3), type='l', log='y', lty=1,
+        xlab="Current age", ylab="Hazard ratio")
+text(60, 5, "NAFLD")
+
+matplot(65:95, exp(p4), type='l', log='y', lty=1,
+        xlab="Current age", ylab="Hazard ratio")
+text(70, 5, "MAP")
+par(oldpar)
+
+# some numbers used later
+margin <- function(p) {
+    mean(exp(p[,2] - p[,1]))
+}
+m1 <- round(margin(p1),2)
+m2 <- round(margin(p2),2)
+m3 <- round(margin(p3),2)
+m4 <- round(margin(p4),2)
+@ 
+  \caption{Predicted hazard ratios from Cox model fits with current age and 
+    sex as covariates;  free light chain (FLC), monoclonal gammopathy of
+    undetermined significance (MGUS), non-alcoholic fatty liver disease
+    (NAFLD) and the minority and aging project (MAP).}
+  \label{agefig2}
+\end{figure}
+
+What is perhaps more surprising is how often this same relationship holds,
+at least approximately, in research studies.
+Figure \ref{agefig2} shows simple age and sex fits for four different
+studies.
+In each Cox model fit we used current age rather than enrollment age as the
+(time dependent) covariate; death is the endpoint.
+The FLC study solicited Olmsted County subjects over the age of 50, with a 
+blood draw as part of their current visit, for permission to run an extra
+test on the obtained sample (at no cost). 
+Participation was very high, and so we might expect to see
+a reprise of the overall US pattern.
+The MGUS study followed subjects for whom a particular (rather rare) test had
+been ordered, so represent a select subset.
+The NAFLD study contains post-diagnosis follow-up for all subjects diagnosed 
+with fatty liver disease along with age and sex matched controls.
+The Rush University Memory and Aging project enrolled community subjects for 
+a study of long term cognitive changes.
+
+The models all used time-dependent age (current age) $a(t)$ as a covariate.
+If subject $i$ has an event at time $t$ and $s$ is the 0/1 sex variable,
+and $a(t)$ is linear, then the Cox hazard ratio satisfies
+\begin{align*}
+  \frac{e^{\eta_i}}{\sum_j Y_j(t) e^{\eta_j}} &= 
+  \frac{e^{\beta_1a_i(t) + \beta_2s_i}}{\sum_j Y_j(t) e^{\beta_ia_j(t) + \beta_2 s_j}} \\
+    &= \frac{e^{\beta_1(t+ a_i(0)) + \beta_2s_i}}
+       {\sum_j Y_j(t) e^{\beta_i(t + a_j(0)) + \beta_2 s_j}} \\
+    &= \frac{e^{\beta_1a_i(0) + \beta_2s_i}}
+       {\sum_j Y_j(t) e^{\beta_ia_j(0) + \beta_2 s_j}} 
+\end{align*}
+
+where $a_i(0)$ is the age at enrollment for subject $i$.
+That is, if the age effect is linear, then Cox models using the age at 
+enrollment (time fixed covariate) and
+using current age (time dependent) are identical.   
+The former model is much easier to fit, since a time-dependent age covariate
+does not need to be created.  As well, the code to create predicted survival 
+curves from the fitted model is substantially easier. 
+
+For this reason, nearly every published analysis uses baseline age as a 
+time fixed
+covariate; but checks for whether the necessary linearity assumption is 
+justified are extremely rare.
+The fact that linearity of age will often be close to true is, in our opinion,
+one of the reasons for the remarkable success of the Cox model.
+Quoting GEP Box: ``Assumptions, whether implied or clearly stated, are never
+ exactly true.
+So the question you need to ask is not `Is the model true?' (it never is) 
+but `Is the model good enough for this particular application?' ''
+Linear age + additive sex will quite often be ``good enough''.
+
+However, a caution is in order, particularly for studies that span a
+large age range, either through a broad enrollment window or long follow-up.
+Notable in all the cases above is how very \emph{large}
+ the age effect is. 
+Most studies target effects of 1.3 fold or greater, and are excited to find 
+them; the age effects above can span a 100 fold change in risk.
+Indeed, the sex effects in each of the 4 cases are large, 1.5 -- 2.2 fold, 
+but look visually small in comparison.
+A benign time dependent covariate that is associated with age may appear highly
+significant, simply by acting as a surrogate for any non-linearity of age,
+``subject has turned gray'' for instance.
+
+As a simple and perhaps silly example add the variable ``has retired'', coded
+as the time depedent covariate of 1 if age $>$ 65 and 0 otherwise, and another
+variable RMD with a cutoff of age 72, an indicator of
+whether the subject will have begun to take RMD withdrawals from their pension
+plan.
+
+<<agefit3, echo= TRUE>>=
+test <- coxph(Surv(futime, status) ~ age + male + I(age > 65), nafld1,
+              subset= (futime > 7))
+# and as a time dependent
+temp <- subset(nafld1, ,c(id, age, male))
+ndata <- tmerge(temp, nafld1, id=id, death= event(futime/365.25, status))
+temp <- data.frame(id= ndata$id, rmd65 = 65- ndata$age, rmd72 = 72-ndata$age)
+ndata <- tmerge(ndata, temp, id=id, retire= tdc(rmd65), rmd= tdc(rmd72))
+coxph(Surv(tstart, tstop, death) ~ age + male + retire, ndata)
+coxph(Surv(tstart, tstop, death) ~ age + male + rmd, ndata)
+# time-dependent is far from significant
+@ 
+
+We see that addition of age65 has a very small $p$, but 72 not at all.
+The upshot is that a variable like ``Medicare insurance'' could appear to be
+very significant when it is only a bystander to the non-linearity.
+(A closer look at the lower left panel in figure \ref{agefig2} hints that
+the age 65 indicator may simply be closer to the bend.)
+
+
+
+\paragraph{Using age scale}
+One way to deal with a possible non-liner age effect is to use age as
+the underlying time scale for the proportional hazards model.
+There are two advantages: it perfectly adjusts for age via matching, and the 
+interpretation of the resulting coefficients is in many cases more natural.
+Coefficients will reflect the relative hazard of any subject as compared to 
+others of the same age, rather than comparing to others at the same time from 
+enrollment.
+For a study such as NAFLD, the time since enrollment has little biological 
+meaning for a matched control: it is the age they were randomly selected.
+A possible downside to using age as the time scale is that there will no longer
+be an age coefficient in the model, i.e., no p-value. 
+However, for long term processes such as these everyone already knows that
+higher age is a risk factor for death, there is no utility to
+``proving'' it once again.
+
+One aspect that is often overlooked is symmetry, the model using 
+time-since-entry as the underlying scale used age as a covariate;
+conversely, 
+models using age a covariate should consider time since enrollment as a 
+covariate.
+As a example look at the MGUS and MAP data sets.
+For MGUS we have divided the time on study into 3 epochs of 0--6, 6--12
+and $>12$ months of followup, using the last year as reference, while MAP
+is divided as 1, 5 and 10+ years. 
+Results are shown in Table \ref{agemgus}.  
+In the MGUS data, death rates in the first 6 months after enrollment are
+2.6 fold higher than in later follow-up,
+while in the MAP study death rates in the first year are $<$ 1/2 of those
+at later times.
+For MGUS the underlying test, serum protein electrophoresis,
+is normally ordered in the diagnostic work-up for patients with serious
+illness.  The results we see are due to a selection effect: many of these 
+patients are facing imminent mortality.  
+In fact, in a follow-up study (not shown) we found a similar mortality
+excess for all patients who had the test ordered, not just those with a
+positive result.
+
+The MAP study displays a more common result, one that we see with most studies
+that involve voluntary patient recruitment.  
+Essentially, patients who are in extremis are much less likely to enroll in 
+a long term monitoring study.  Comparing two 80 year old subjects, for instance,
+one of whom was enrolled 5 years ago and the other enrolled last week,
+the second of these is unlikey to die in the next few months --- if they
+had such serious illness, and were aware of it, the subject would not have 
+enrolled. 
+The opposite can happen in a chronic disease that waxes and wanes; subjects
+currently experiencing difficultly  may have a greater motivation to
+enter a research study. 
+
+The last row of the table applies the same criteria to all subjects who were
+chosen as controls for the NAFLD study.  This did not involve a for cause
+visit, nor explicit per-study consent, and we here see no effect of the
+time since random selection.
+
+\begin{table}
+<<agemgus>>=
+# to do, turn these into a table
+# MGUS on age scale, with time since enrollment as a covariate
+mfit2 <- coxph(Surv(age, age+ futime/12, death) ~ sex + tt(age),
+               data=mgus2, tt = function(x, t, ...) {
+                   ftime <- as.numeric(cut(t-x, c(-1, .5, 1, 100)))
+                   cbind(1* (ftime==1), 1*(ftime==2))
+               })
+
+# Rush MAP study
+rfit2 <- coxph(Surv(age_bl, age_bl + futime, died) ~ sex + tt(age_bl),
+               data=rdata, tt = function(x, t, ...) {
+                   ftime <- as.numeric(cut(t-x, c(-1, 1, 5, 10, 100)))
+                   cbind(1* (ftime==1), 1*(ftime==2), 1*(ftime==3))},
+               subset= (futime > 0))
+
+# FLC study
+flfit2 <- coxph(Surv(age, age + futime/365.25, death) ~ sex + tt(age),
+                data= flchain, subset= (futime > 7), 
+                tt = function(x, t, ...) {
+                    ftime <- as.numeric(cut(t-x, c(-1, 1, 2, 5, 10, 100)))
+                    cbind(1* (ftime==1), 1*(ftime==2), 1*(ftime==3),
+                         1* (ftime==4)) })
+
+# NAFLD controls
+nafit2 <- coxph(Surv(age, age + futime/365.25, status) ~ male + tt(age),
+                data= nafld1, subset= (id != case.id), 
+                tt = function(x, t, ...) {
+                    ftime <- as.numeric(cut(t-x, c(-1, 1, 2, 5, 10, 100)))
+                    cbind(1* (ftime==1), 1*(ftime==2), 1*(ftime==3),
+                          1* (ftime==4)) })
+
+cmat <- rbind(c(coef(mfit2), NA,NA), c(coef(rfit2), NA), 
+              coef(flfit2), coef(nafit2))
+dimnames(cmat) <- list(c("MGUS", "MAP", "FLC", "NAFLD"),
+                       c("male", "0-1y", "1-2y", "2-5y", "5-10y"))
+print(round(exp(cmat),2), na.print="")
+@ 
+\caption{Hazard ratios for models on age scale, with age and time from enrollment
+  as covariates.  (To do: format as a real table.) The time intervals for
+  MGUS are 0-6m, and 6-12m, with $>12$m as the reference, for MAP that are 0-1y,
+  1-5y and 5-10y, with $>10$ as reference; column labels are correct for FLC
+  and the NAFLD control subjects.}
+\label{agemgus}
+\end{table}
+
+In spite of my exhortation that you should always look, the time
+from enrollment bias can often have little if any effect on coefficients of
+interest.  Both treated and control will have the same bias applied. See the
+mfit3a and mfit3b fits above, for instance.
+
+\paragraph{Absolute risk curves}
+Another aspect of using age scale is that the survival curves, derived from
+a Cox model, will now be on age scale. 
+Predicted curves are, as always for a Cox model, for one or more 
+hypothetical subjects with specified covariate values. 
+In addition, we need to specify a starting age, e.g., the predicted curve
+for a male, alive at age 60, for future ages.
+
+How do we deal with the time-dependent covariate, time since enrollment?
+Our usual choice is to fix this at the reference level of 10+ years
+(or whatever was chosen); that is, to show the curve for a hypothetical
+subject who was chosen at random from the population, without selection
+effects due to disease or consent, since that matches application of the
+results to the population at large.
+
+\begin{table} \centering
+  \begin{tabular}{ccc}
+    & Male sex & Hgb \\ \hline
+
+<<agemusg2, echo=FALSE, results='asis'>>=
+# Three MGUS fits
+mfit3a <- coxph(Surv(futime, death) ~ age + sex + hgb, mgus2)
+mfit3b <- coxph(Surv(age, age+futime/12, death) ~ sex + hgb, mgus2)
+mfit3c <- update(mfit2, . ~ .+ hgb)
+# the survfit routine cannot deal with a tt() model, we have to create an
+# explicit start-stop data set.
+mdata <- survSplit(Surv(futime/12, death) ~ ., mgus2, cut=c(.5, 1),
+                   episode= "itime")
+mdata$age1 <- with(mdata, age + tstart) # in years
+mdata$age2 <- with(mdata, age + tstop)
+mdata$itime <- factor(mdata$itime, c(3,1,2))
+mfit3d <- coxph(Surv(age1, age2, death) ~ sex + hgb + itime, mdata)
+mfit3e <- coxph(Surv(futime, death) ~ sex + hgb, mgus2)
+# all.equal(mfit3c$loglik, mfit3d$loglik)  # verify that we got the same fit.
+
+temp <- rbind(summary(mfit3a)$coefficients[2:3, c(1,3)],
+              summary(mfit3d)$coefficients[1:2, c(1,3)],
+              summary(mfit3e)$coefficients[1:2, c(1,3)],
+              summary(mfit3b)$coefficients[1:2, c(1,3)])
+temp2 <- sprintf("%5.2f (%4.2f)", temp[,1], temp[,2])
+cat("Time since entry scale, adjusted for age &", 
+    paste(temp2[1:2], collapse= " & "), "\\\\ \n")
+cat("Age scale, adjusted for time since entry &", 
+    paste(temp2[3:4], collapse= " & "), "\\\\ \n")
+cat("Time since entry, unadjusted for age &", 
+    paste(temp2[5:6], collapse= " & "), "\\\\ \n")
+cat("Age scale, unadjusted for time &", 
+    paste(temp2[7:8], collapse= " & "), "\n")
+@ 
+  \end{tabular}
+   \caption{Three different models for the MGUS data.}
+   \label{agemgus2}
+\end{table}
+
+Table \ref{agemgus2} shows coefficients for the MGUS data using the three
+possible models. A spline fit (not shown) suggests that the hemoglobin effect
+is approximately linear.  
+The coefficients for sex and hgb are nearly identical for three of the four
+fits, something we have seen replicated in other cases but not all.
+Formally, it is most correct to adjust the age scale fit for entry, since the
+effect is highly significant, but because that variable is well balanced 
+with respect to other covariate the impact on coefficients is small.
+(Most of the effect is in the first epoch, when all are still present).
+Age is a much larger effect, and not as well balanced.
+
+\begin{figure}
+<<agefig4>>=
+dummy1 <- expand.grid(age=c(65, 80), sex='M', hgb=c(12, 15))
+dummy2 <- expand.grid(sex='M', hgb=c(12, 15), itime='3')
+msurv3a <- survfit(mfit3a, newdata=dummy1)
+msurv3b1 <- survfit(mfit3b, newdata=dummy2, start.time=65)
+msurv3b2 <- survfit(mfit3b, newdata=dummy2, start.time=80)
+msurv3d1 <- survfit(mfit3d, newdata=dummy2, start.time=65)
+msurv3d2 <- survfit(mfit3d, newdata=dummy2, start.time=80)
+
+oldpar <- par(mfrow=c(1,2), mar=c(5,5,1,.5))
+plot(msurv3a, col=c(1,2,1,2), lty=c(1,1,2,2), xscale= 12,
+     xlab="Years since PCE", ylab="Survival")
+#lines(msurv3e, col=c(3,4,3,4), lty=3)
+legend(10*12, .9, c("hgb=15, age 65", "hgb=12, age 65",
+                 "hgb=15, age 80", "hgb=12, age 80"), lty= c(2,1,2,1),
+       col=c(1,1,2,2), bty='n', cex=.8)
+
+plot(msurv3b1, col=1, lty=1:2, 
+     xlab="Age", ylab="Survival")
+lines(msurv3b2, col=1, lty=1:2)
+lines(msurv3d1, col=4, lty=1:2)
+lines(msurv3d2, col=4, lty=1:2)
+legend(82, .9, c("hgb= 15", "hgb= 12"), lty=2:1, bty='n', cex=.8)
+par(oldpar)
+@
+  \caption{Predicted survival curves for a male with hgb of 12 and 15, starting
+at age 65 or 80.  The left panel is from a Cox model using time since enrollment
+scale, the right panel from a model using age scale. 
+In the right panel the second color indicates curves that
+have been adjusted for the initial selection effect.}
+  \label{agefig4}
+\end{figure}
+
+Figure \ref{agefig4} shows predicted survival curves, on the left for enrollment
+scale and on the right using age scale.  The right panel shows curves with
+and without adjustment for the selection effect, where without = a model
+without time from entry as a covariate, and with = predicted curves from a
+model that does include time from entry, predictions for a subject that 
+did not experience that selection effect.  
+
+
+\end{document}
