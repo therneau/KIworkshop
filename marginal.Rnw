@@ -1,0 +1,200 @@
+\documentclass{article}[11pt]
+\usepackage{amsmath}
+\addtolength{\textwidth}{1in}
+\addtolength{\oddsidemargin}{-.5in}
+\setlength{\evensidemargin}{\oddsidemargin}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\title{Marginal Estimates}
+\author{Terry Therneau}
+\date{19 Sept 2023}
+
+\begin{document}
+\maketitle
+
+<<setup, echo=FALSE>>=
+library(knitr)
+library(survival)
+library(splines)
+
+opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
+               fig.width=4.5, fig.height=3, fig.path="figures/",
+               device="pdf", dev.args=list(pointsize=8),
+               cache=FALSE,   background="#ffffff",
+               prompt=TRUE,
+               strip.white=FALSE, mymar=TRUE)
+options(contrasts= c("contr.treatment", "contr.poly"),
+        show.signif.stars = FALSE, continue=" ", width=65)
+
+# because "mymar" is set to TRUE above, this hook will be run on every chunk.
+# it sets the margins, font, etc to values that work
+knit_hooks$set(mymar= function(before, options, envir) {
+    if (before) {
+        look.for <- c("mar", "font", "cex")  # options we want
+        plist <- options[match(look.for, names(options), nomatch=0)]
+        if (is.null(plist$mar)) plist$mar <- c(4, 4, .5, .5)
+        if (is.null(plist$cex)) plist$cex <- 1
+        do.call("par", plist)
+    } else NULL
+})
+
+table2 <- function(...) table(..., useNA = "ifany")
+@
+
+\begin{quote}
+ ``Comparative experiments are mandatory in order to not view
+ coincidences as cause-effect relationships. \ldots The comparative
+ experiment requires, to be of some value, to be run in the same time
+ and on as similar as possible patients, else the physician walks at
+ random and becomes the sport of illusions.''  
+ C.Bernard, Introduction \`{a} L`Etude de la M\'{e}dicine Exp\'{e}rimantale, 1866
+\end{quote}
+
+\begin{center} Statistics is the art of clever averaging. \end{center}
+
+To avoid the messiness of multiple covariate-specific curves and to provide an illustration of
+the difference between groups after adjustment for confounders, it would be useful to create a
+single overall curve for each FLC group. These curves need to be
+both adjusted for the other covariates and properly calibrated (i.e.,
+the overall average value is correct). The key idea is to impose balance.  
+To illustrate the idea
+we start with a simple example. % using linear regression.
+
+\begin{figure}[htb]
+<<faketrial>>=
+plot(c(50,85), c(2,4.5), type='n', xlab="Age", ylab="Outcome measure")
+#abline(.645, .042, lty=1, col=1, lwd=2)
+#abline(.9, .027, lty=1, col=2, lwd=2)
+abline(.35, .045, lty=1, col=1)
+abline(1.1, .026, lty=2, col=1)
+legend(50, 4.2, c("Treatment A", "Treatment B"), 
+        col=1, lty=1:2, cex=1.3, bty='n')
+@
+\caption{Hypothetical clinical trial comparing 2 treatment arms (A and B)}
+\label{ch05.2a}
+\end{figure}
+
+Consider the hypothetical data shown in Figure \ref{ch05.2a}
+comparing two treatment arms, A and B, with age as a confounder.
+What is a succinct but useful summary of the treatment effect
+for arms A and B and of the difference between them?
+One approach is to select a fixed \emph{population} for the
+age distribution, and then compute the
+mean effect over that population.
+
+More formally, assume we have a fitted model.
+We want to compute the conditional expectations
+\begin{align}
+   m_A &= E_F\left(\hat \theta | \mbox{trt}=A \right)  \label{m.a}\\
+   m_B &= E_F\left(\hat \theta | \mbox{trt}=B \right)  \label{m.b}
+\end{align}
+where $F$ is some chosen population for the covariates other than treatment.
+
+Key questions are
+\begin{enumerate}
+  \item What statistic $\hat \theta$ to average.
+  \item What population to use for the adjusting variables
+  \item Statistical properties of $m_A$, $m_B$, $m_A - m_B$
+  \item How to compute all this
+  \item What to call it
+\end{enumerate}
+
+With repect to 5 there have been dozens of names: population marginal means, 
+g-estimates, marginal effect, Yates' sum of squares, standardized incidednce
+ratio, least squares means, \ldots.
+This basic idea has been discovered dozens of times.
+
+The most imortant qustion is what to average. One possible guiding princple
+is what I call a ``poor man's definition'' of a causal estimate.
+\begin{itemize}
+  \item The prediction can, at least in theory, be assessed in an individal.  
+If I say that Terry's hazard ratio for death is 1.4, and then follow him for 30 
+years, there is nothing I can measure to evaluate the statement.  On the other
+hand, a statement that Terry's 5 year P(survival) is .5, the observed survival
+provides data.
+  \item The average over a group is informative for the individual, 
+    $\hat\theta_G = (1/n) \sum \hat\theta_i$
+\end{itemize}
+Under this definition, predicted survival curves, E(sojourn times), etc are
+causal.  
+
+The second important question is what choice to give for the population $F$,
+and this depends critically on what question we want to answer.
+For instance, in the simple example of Figure \ref{ch05.2a}, if we were
+considering deployment of these two treatments in nursing home patients, then it
+would make sense to use an average that gives larger weights to older ages,
+e.g., a known age distribution for nursing homes.
+Three common choices for $F$ are:
+\begin{enumerate}
+  \item Empirical: the dataset itself or a specific subset.
+   \begin{itemize}
+      \item   For the simple example above, this
+    would be the distribution of all $n$ ages in the dataset, 
+    irrespective of treatment.
+      \item For a case-control study, it is common to use the distribution 
+        of the cases.
+    \end{itemize}
+  \item External: An external reference population, such as:
+    \begin{itemize}
+      \item A fixed external reference, e.g., the age/sex distribution of the
+        2000 US Census.  This approach is common in epidemiologic studies.
+      \item Data from a prior study.  This can be useful for comparison
+        of one study to another.
+    \end{itemize}
+  \item Factorial or Yates: the dataset for a balanced factorial 
+        experiment. This is only applicable if the adjusting 
+        variables are all categorical; the population consists of all unique 
+        combinations of the adjusters.    
+  \item Theoretical, e.g., using the Gaussian for
+        a random effect term.
+  \item SAS type III.  Factorial for all categorical covariates, emprical for
+    all continuous ones.
+\end{enumerate}
+
+The modern computation is simple brute force.
+Create a copy of the data set ($n$ obs)
+   \begin{itemize}
+     \item set x=1 for all obs,  compute the $n$ predicted values, average
+     \item set x=2 for all obs,  compute the $n$ predicted values, average
+     \item \ldots
+\end{itemize}
+The problem is variance.  Bootstrap, IJ, \ldots?
+
+For $\hat\theta = \eta = X \hat\beta$
+\begin{align*}
+   m_1 &= 1'(X^{\dagger 1} \hat\beta)/n \\
+       &= (1/n)(1'X^{\dagger 1}) \hat\beta\\
+       &= c_1 \hat\beta  \\
+   {\rm var}(m_1) &= c_1' V c_1 
+\end{align*}
+The math is nice, but for a Cox (or logistic) model the 
+population average linear predictor is not a useful quantity.
+
+
+\paragraph{Yates}
+Assume that the $X$ matrix is in standard order: intercept, then main effects,
+2 way interactions, 3 way interactions, etc; and that all the variables are 
+factors.  If there are any empty cells the Yates' estimate is not defined, so
+assume none.
+Let $Z$ be a balanced subset of $X$, i.e., all combinations of the factors 
+appear equally (one row per combination will suffice).  Let  $C$ be a 
+matrix such that $C(Z'Z)^{-1}C' = I$; e.g., the Cholesky decompostion of
+$Z'Z$, and $C_g$ be the rows of $C$ corresponding to one of the main effects.
+Then $C_g\beta$ is the constrast corresponding to the Yates' SS for that
+margin.  Proof: assign to a postdoc.
+
+This is the heart of the SAS type 3.  But the documentation is tailored to the
+form of $X$ and the computational ``leftovers'' from the original SAS GLM
+procedure.  If there are missing cells the details of the compuation, and the
+final results are opaque.  The phglm procedure uses an incorrect version of the
+algorithm, and the type 3 tests are complete garbage.
+
+\end{document}
+
+
+
+
+
+
+
+

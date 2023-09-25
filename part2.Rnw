@@ -11,6 +11,7 @@
 
 \begin{document}
 \maketitle
+
 <<setup, echo=FALSE>>=
 library(knitr)
 opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
@@ -33,7 +34,7 @@ knit_hooks$set(mymar= function(before, options, envir) {
         do.call("par", plist)
     } else NULL
 })
- 
+
 table2 <- function(...) table(..., useNA = "ifany")
 library(survival)
 library(splines)
@@ -416,7 +417,58 @@ legend(.5, .2, label, col=1:6, lwd=2)
   \label{flc9}
 \end{figure}
 
-Can we get a single number summary for the YLL due to FLC?
+Can we get a single number summary for the YLL due to FLC?  This is done either
+using marginal estimates or direct regression.
+Plots for a marginal estimate are shown in figure \ref{flc10}.
+In short, for every person in the data set compute the predicted survival
+curve with flc10=0 and a second curve with flc=1; read off the values at our
+chosen time point and compute the difference.
+The curves use only 1/3 of the data points, to partially alleviate overplotting
+on the graph (and speed things up).
+
+\begin{figure}
+<<flc10>>=
+#Marginal estimates at 5. 10, and 14 years, flc high vs low
+dummy <- subset(flc2, !is.na(creat))
+dummy <- dummy[seq(1, 6001, by=3), ] # using all obs kills the laptop
+dummy$flc10 <- 0
+fsurv0 <- survfit(cfit, newdata=dummy, se.fit=FALSE)
+dummy$flc10 <- 1
+fsurv1 <- survfit(cfit, newdata=dummy, se.fit=FALSE)
+if (TRUE) {
+    # work around a bug in summary.survfit (found on 24 Sep)
+    indx <- findInterval(c(5, 10, 14), fsurv0$time, left.open=TRUE)
+    prob0 <- fsurv0$pstate[indx,,]
+    prob1 <- fsurv1$pstate[indx,,]
+} else {
+    prob0 <- summary(fsurv0, times=c(5, 10, 14))$pstate
+    prob1 <- summary(fsurv1, times=c(5, 10, 14))$pstate
+}
+
+oldpar <- par(mfrow=c(2,2))
+plot(prob0[1,,2], prob1[1,,2]- prob0[1,,2],
+     xlab="P(cardiac death in 5 years), flc10=low", 
+     ylab="P(high) - P(low)",
+     col= floor(dummy$age/10) -4)
+abline(h= mean(prob1[1,,2]- prob0[1,,2]), col=1, lwd=2, lty=2)
+
+plot(prob0[2,,2], prob1[2,,2]- prob0[2,,2],
+     xlab="P(cardiac death in 10 years), flc10=low", 
+     ylab="P(high) - P(low)",
+     col= floor(dummy$age/10) -4)
+abline(h= mean(prob1[2,,2]- prob0[2,,2]), col=1, lwd=2, lty=2)
+
+plot(prob0[3,,2], prob1[3,,2]- prob0[3,,2],
+     xlab="P(cardiac death in 14 years), flc10=low", 
+     ylab="P(high) - P(low)",
+     col= floor(dummy$age/10) -4)
+abline(h= mean(prob1[3,,2]- prob0[3,,2]), col=1, lwd=2, lty=2)
+par(oldpar)
+@ 
+  \caption{Marginal effects for the FLC study, colors correspond to
+    decade of age.}
+  \label{flc10}
+\end{figure}
 
 \subsection{The Aalen-Johansen estimate, again}
 <<ajsetup>>=
