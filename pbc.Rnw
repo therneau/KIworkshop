@@ -1,0 +1,470 @@
+\documentclass{article}[11pt]
+\usepackage{amsmath}
+\addtolength{\textwidth}{1in}
+\addtolength{\oddsidemargin}{-.5in}
+\setlength{\evensidemargin}{\oddsidemargin}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\title{Time dependent covariates and absolute risk}
+\author{Terry Therneau}
+\date{19 Sept 2023}
+
+\begin{document}
+\maketitle
+
+<<setup, echo=FALSE>>=
+library(knitr)
+library(survival)
+library(ggplot2)
+opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
+               fig.width=4.5, fig.height=3, fig.path="figures/",
+               device="pdf", dev.args=list(pointsize=8),
+               cache=FALSE,   background="#ffffff",
+      prompt=TRUE,
+               strip.white=FALSE, mymar=TRUE)
+options(contrasts= c("contr.treatment", "contr.poly"),
+        show.signif.stars = FALSE, continue=" ", width=65)
+
+# because "mymar" is set to TRUE above, this hook will be run on every chunk.
+# it sets the margins, font, etc to values that work
+knit_hooks$set(mymar= function(before, options, envir) {
+    if (before) {
+        look.for <- c("mar", "font", "cex")  # options we want
+        plist <- options[match(look.for, names(options), nomatch=0)]
+        if (is.null(plist$mar)) plist$mar <- c(4, 4, .5, .5)
+        if (is.null(plist$cex)) plist$cex <- 1
+        do.call("par", plist)
+    } else NULL
+})
+@
+
+\section{Introduction}
+A common question, and pitfall, is how to create survival curves from a
+Cox model with time-dependent covariates.
+A survival curve is a statement, at some given point in time, of predicted
+future survival given known covariates \emph{at that time}.
+When the model includes time-dependent covariates, such a prediction requires,
+as well, joint prediction of future covariate paths for any time-dependent
+covariates.
+Standard software does not provided this joint prediction, instead there is
+wide opportunity to produce incorrect or misleading results.
+(Note that this is a different question than time-dependent coefficients, which
+appear in a discussion of proportional hazards.)
+As an illustration, we reprise an example from Section 10.2.4 of 
+\cite{Therneau00}.
+
+<<pbcurve1>>=
+# Create the time1, time2 data set
+pdat0 <- subset(pbcseq, !duplicated(id))
+pdat0$bili3 <- cut(pdat0$bil, c(0, 1, 5, 100), c("normal", "1-5", ">5"))
+pdata <- tmerge(pdat0[,c(1,4:6)], pdat0, id=id,
+                 death = event(futime, status==2),
+                 options= list(tstart="day1", tstop="day2"))
+pdata <- tmerge(pdata, pbcseq, id=id, edema = tdc(day, edema),
+                bili= tdc(day, bili), albumin = tdc(day, albumin),
+                protime = tdc(day, protime))
+pdata <- survSplit(Surv(day1, day2, death)~ ., pdata, cut=c(365, 365*3),
+                    episode="enum")
+pdata$year <- factor(pdata$enum, c(3,1,2), c("3+", "0-1", "1-3"))
+pdata$enum <- NULL  # no longer needed
+pdata$age1 <- pdata$age + pdata$day1/365.25
+pdata$age2 <- pdata$age + pdata$day2/365.25
+pdata$bili3 <- cut(pdata$bili, c(0, 1, 5, 100), c("normal", "1-5", ">5"))
+
+# Now create the multistate data set using bilirubin groups
+# There is already a new obs whenever bilirubin changes
+new <- which(diff(pdata$id)==0 & diff(as.numeric(pdata$bili3))!=0)
+temp <- 4*(pdata$death)  # vector of 0 or 4
+temp[new] <- as.integer(pdata$bili3)[new+1]
+pdata$bstate <- factor(temp, 0:4, c("none", "normal", "1-5", ">5", "death"))
+
+# pfit0 = the original pbc model
+# pfit1 = non-time dependent fit, updated data
+# pfit2 = time-dependent fit
+# pfit3 = time-dependent, on age scale
+# pcheck = verify that years since enrollment has only minor impact
+
+pfit0 <- coxph(Surv(time, status==2) ~ age + edema + log(bili) + albumin +
+                log(protime), pbc, x=TRUE)
+pfit1 <- coxph(Surv(futime, status==2) ~ age + edema + log(bili) + albumin +
+               log(protime), pdat0, x=TRUE)
+pfit2 <- coxph(Surv(day1, day2, death) ~ age + edema + log(bili) + 
+                   albumin + log(protime), pdata)
+pfit3 <- coxph(Surv(age1, age2, death) ~ edema + log(bili) + albumin + 
+                   log(protime), pdata)
+pcheck <- update(pfit3, . ~ .+ year)
+# anova(pfit3, pcheck)
+@ 
+
+\begin{table} \centering
+    \begin{tabular}{ccccc}
+     &All 424 & 312 & 312 \\ &Time fixed & Time fixed & Time dependent \\ \hline
+<<coeftable, results="asis">>=
+iqr <- apply(pfit1$x, 2, function(x) diff(quantile(x, c(.25, .75))))
+iqr[2] <- 1 #doesn't work for edema
+temp <- iqr* cbind(pfit0$coef, pfit1$coef, pfit2$coef, c(0, pfit3$coef))
+temp <- abs(temp)
+temp2 <- c(concordance(pfit0)$concordance, concordance(pfit1)$concordance, 
+           concordance(pfit2)$concordance, concordance(pfit3)$concordance)
+cat("age &",  paste(sprintf("%4.2f", temp[1,1:3]), collapse= ' & '), "\\\\ \n")
+for (i in 2:5)
+    cat(rownames(temp)[i], '&', paste(sprintf("%4.2f", temp[i,]),
+                                      collapse= ' & '), "\\\\ \n")
+cat("\\hline concordance&", sprintf("%4.2f", temp2), "\n")
+@ 
+  \end{tabular}
+  \caption{Standardized coefficients for the original PBC model using all 
+    424 subjects,
+    and using the 312 study subjects with either time fixed or time dependent
+    predictors on entry scale, and then time-dependent on age scale.
+    These represent the effect of a 1 unit change in edema, and a change
+    from the 25th to 75th percentile for the other 4.}
+   \label{pbctab1}
+\end{table}
+
+This study recuited subjects with primary biliary cholangitis to a placebo
+controlled trial of D-penicillamine.  PBC is a chronic 
+condition that at the time had no effective therapy. 
+During the recruitment period 424 patients met the eligivility criteria;
+312 agreed to participate fully and another 108 to initial laboratory 
+measurements and long term follow-up.  
+Sequential laboratory data and further follow-up is available on the 312
+enrollees. The survival package data set \code{pbc} contains baseline values
+and survival for all 418 and \code{pbcseq} the sequential lab values.
+As background, table \ref{pbctab1} shows the coefficients for each
+of the 5 variables used in the risk score model of 
+Dickson et al (doi: 10.1002/hep.1840100102), 
+3 models fit to the extended data, and the model concordance.
+The models using baseline data for all 418 and the 312 in the study
+ have essentially the
+same predictive power, but the time-dependent covariate models are clearly
+stronger.
+Bilirubin is the most important predictor: a subject at the 75th percentile
+has exp(1.2) $\approx 3.3$ fold hazard as someone at the 25th percentile of
+bilirubin.
+
+As an aside, the coefficients for enrollment time, in the age scale model,
+are not significant but also not trivial (estimated 1.3 increase).
+But the first 5 years' survival for the study and expanded cohort essentially
+overlap.
+<<coef, echo=TRUE>>=
+print(pcheck, digits=2)
+@ 
+
+\begin{figure}
+<<pbcfig0>>=
+p1 <- survfit(Surv(time, status==2) ~1, pbc)
+p2 <- survfit(Surv(futime, status==2)~1, pdat0)
+plot(p1, xmax= 5*365.25, xscale= 365.25, conf.int=F, fun='event', lwd=2,
+     xlab="Years from randomization", ylab="Death")
+lines(p2, col=2, lty=2, lwd=2, fun='event', conf.int=FALSE)
+legend(100, .25, c("All 418", "Randomized 312"), lty=1:2, col=1:2, lwd=2)
+@
+  \caption{Comparison of the 312 randomized to the full cohort.}
+  \label{pbcfig0}
+\end{figure}
+
+\begin{figure}
+<<peffect>>=
+scores <- pfit1$x %*% diag(coef(pfit1))
+scores <- scale(scores, scale=FALSE) # subtract the mean
+dscore <- data.frame(eta= c(scores), variable=names(pfit1$coef)[col(scores)])
+ggplot(dscore, aes(x=variable, y=eta)) +
+    geom_violin(trim=FALSE, fill='lightblue')+ 
+     geom_boxplot(width=0.03) + theme_minimal()
+@ 
+  \caption{Relative effect of each covariate on the risk score $\eta$.}
+  \label{peffect}
+\end{figure}
+
+\begin{figure}
+<<pbcfig1>>=
+temp <- survcondense(Surv(age1, age2, death) ~ bili+ albumin, id=id, pdata)
+count <- table(temp$id)
+p10 <- subset(temp, id %in% names(count)[count>9]) # 10 or more
+idx <- unique(p10$id)
+
+oldpar <- par(mfrow=c(2,2), mar=c(5,5,1,1))
+for (j in 1:4) {
+    plot(bili ~ age1, p10, log='y',type='n', xlab="Age")
+    for (i in seq(j, length(idx), by=4)) {
+        who <- (p10$id == idx[i])
+        lines(bili ~age1, p10, subset= who, col= 1 + i%%7)
+        k <- who & (p10$death==1)
+        if (any(k)) points(p10$age1[k], p10$bili[k], pch=1, 
+                          col= 1 + i%%7)        
+    }
+    abline(h=1.3, lty=3)
+}
+par(oldpar)
+@ 
+  \caption{Bilirubin trajectories for the 53 subjects with 10 or more laboratory
+    measurements, separated into 4 panels to decrease overlap.  A bilirubin 
+    of $\le 1$ is normal, and above 1.3 begins to be a cause for concern
+    (the horizontal dotted line).  Deaths are marked with a circle.}
+  \label{pbcfig1}
+\end{figure}
+
+Figure \ref{pbcfig1} helps explain the superiority of the time-dependent model.
+To paraphase one of the MD investigators, the liver has a moderate amount of
+excess capacity. As the disease's inflammatory process continues, it steadily 
+converts functioning tissue to scar, and liver function tests slowly rise to a
+point but then rapidly increase when that excess capacity is exhausted.  
+At the start
+of the trial subjects ranged from early to late disease; as time goes on
+we see that many of them experience the bilirubin acceleration.
+
+\subsection{KM curves}
+
+\begin{figure}
+<<pkm1>>=
+km1 <- survfit(Surv(futime, status==2) ~ bili3, pdat0)
+km2 <- survfit(Surv(day1, day2, death) ~ bili3, pdata)
+aj3 <- survfit(Surv(day1, day2, bstate) ~ 1, pdata, id=id, istate=bili3)
+aj3a <- survfit(Surv(day1, day2, bstate) ~ 1, pdata, id=id, istate=bili3,
+                p0=c(1,0,0,0))
+aj3b <-  survfit(Surv(day1, day2, bstate) ~ 1, pdata, id=id, istate=bili3,
+                p0=c(0,1,0,0))
+aj3c <-  survfit(Surv(day1, day2, bstate) ~ 1, pdata, id=id, istate=bili3,
+                p0=c(0,0,1,0))
+plot(km1, col=1:3, lwd=2, fun="event", xscale= 365.25, xmax=12*365.25, ylim=0:1,
+     xlab="Years from randomization", ylab="Death")
+lines(km2, col=1:3, lwd=2, lty=2, fun="event")
+#lines(aj3a[4], col=1, lwd=2, lty=3, conf.int=F)
+#lines(aj3b[4], col=2, lwd=2, lty=3, conf.int=F)
+#lines(aj3c[4], col=3, lwd=2, lty=3, conf.int=F)
+legend(5,1, c("bilirubin >5", "bilirubin 1-5", "normal"), col=3:1, lty=1, 
+       lwd=2, bty='n')
+@  
+ \caption{Survival from baseline for the 3 bilirubin groups.  Solid lines are
+   the Kaplan-Meier, dashed are the ``extended Kaplan-Meier''.}
+ \label{pkm1}
+\end{figure}
+
+For illustration we will divide the subjects into 3 groups: normal bilirubin
+of $\le 1$, 1--5 and 5+. 
+Figure \ref{pkm1} shows the standard Kaplan-Meier for each of the 3 subgroups
+as a solid line, divided by bilirubin level at baseline. 
+The dashed lines are the ``extended Kaplan-Meier'' recommended by Snapinn et al
+\cite{Snapinn05}. 
+These curves make direct use of the time-dependent data set: at each time point
+the increment to bili$>$5 curve is based on the set of subjects
+currently at risk and \emph{currently} having a bilirubin level that is $>5$.
+In the usual KM the increment is based on the initial bilirubin.
+The impact on counts is shown in table \ref{pkm2}.  
+Notice that nearly all the death (100/140) are now attributed to the
+high bilirubin group.
+
+\begin{table} \centering
+ \begin{tabular}{cccccc}
+  & \multicolumn{4}{c}{Number at risk} & Total \\
+  & 0 & 4y & 8y & 12y & Deaths \\ \hline
+ \multicolumn{1}{l}{Usual KM\phantom{MMMMM}} \\
+<<pkm2, results="asis">>=
+temp1 <- summary(km1, times=c(0,4,8,12)*365.25, extend=TRUE)
+#nrisk is currently incorrect for a time-dependent KM
+rcount <- function(time, data=pdata) {
+    if (time==0) atrisk <- (data$day1==0) else
+    atrisk <- (data$day1 < time) & (data$day2 >= time)
+    table(data$bili3[atrisk])
+}
+temp2 <- c(rcount(0), rcount(4*365.25), rcount(8*365.25), rcount(12*365.25))
+temp3 <- rbind(matrix(temp1$n.risk, ncol=4, byrow=TRUE),
+               matrix(temp2, ncol=4, byrow=FALSE))
+temp4 <- table(pdat0$status, pdat0$bili3)
+temp5 <- table(pdata$death, pdata$bili3)
+temp3 <- cbind(temp3, c(temp4[3,], temp5[2,]))
+xx <- c("Normal", "1--5", "$\\>$5")
+for (i in 1:3) 
+    cat(xx[i], " & ", paste(temp3[i,], collapse= "&"), "\\\\ \n")
+cat("\\multicolumn{1}{l}{Extended KM} \\\\ \n")
+for (i in 1:3)
+    cat(xx[i], " & ", paste(temp3[i+3,], collapse="& "), "\\\\\n")
+@ 
+  \end{tabular}
+  \caption{Number at risk a 0, 4, 8, and 12 years along with the total
+    number of deaths for each group, for the two estimators.}
+  \label{pkm2}
+\end{table}
+
+How do we interpret these curves?  The simple KM is simple: each curve is
+an estimate of the future survival, from randomization, for a set of subjects 
+in the given state at randomization.  No use is made of the follow-up
+lab values.  
+For the extended KM, the argument is made that the normal bilirubin curve
+estimates the survival of subjects who start and remain in that state, i.e.,
+their bilirubin never rises above 1, and likewise that curve 2 represents
+subjects whose bilirubin remains between 1 and 5.  A more cautionary note
+is provided in \cite{Sjolander20}, who looks at the risk sets more carefully
+from a causal models perspective; who finds that underlying premise that those
+currently in group 1--3 represent subjects who are always in that state requires
+additional strong assumptions.
+Our view is more simple: even if the curve can estimate what it claims to 
+estimate,
+of what use is it?  In this disease the liver status will invariably
+seriously decline over time; the estimator has created curves for someone who
+does not exist.
+  
+\begin{figure}
+<<pkm3>>=
+oldpar <- par(mfrow=c(2,2))
+par(mar=c(1,1,1,1))
+states <- c("normal\nbilirubin", "1-5", ">5", "death")
+smat <- matrix(0L, 4,4, dimnames= list(states, states))
+smat[1:3,4] <- 1
+smat[1,2] <- smat[2,3] <- 1
+smat[2,1] <- smat[3,2] <- 1.4
+statefig(matrix(c(3,1), ncol=1), smat, alty=c(2,1,2,1,1,1,1))
+
+par(mar=c(5,5,1,1))
+plot(aj3a, col=1:4, lwd=2, xscale=365.25,  xlab="Years from randomization",
+     ylab="P(state)")
+abline(0,0,lty=3)
+plot(aj3b, col=1:4, lwd=2, xscale=365.25,  xlab="Years from randomization",
+     ylab="P(state)")
+legend(4*365, 1, c("Normal","1-5", ">5","Death"), col=1:4, lty=1, bty='n')
+abline(0,0,lty=3)
+
+plot(aj3c, col=1:4, lwd=2, xscale=365.25,  xlab="Years from randomization",
+     ylab="P(state)")
+abline(0,0,lty=3)
+par(oldpar)
+@ 
+  \caption{Potential state space for the PBC data, along with Aalen-Johansen
+    estimates assuming that everyone starts in the normal state (upper right),
+    the bilirubin 1--5 state (lower left), or bilirubin $>5$ state
+    (lower right).
+}
+  \label{pkm3}
+\end{figure}
+
+An alternative that does make use of the evolving laboratory data, but also
+estimates a quantity of direct interest, is a multi-state model shown in
+figure \ref{pkm3}.  Figure \ref{pkm4} shows the predictions for each starting
+state along with the simple KM. 
+The multi-state curve for the 'normal bilirubin state has an increment, at 
+each death time, of 
+\begin{equation*}
+  \sum_i P(s(t) =i | s(0)=1) P({\rm death} | s(t)=i)
+\end{equation*}
+where $s(t)$ is the state. 
+We speculate that the increase in death rate for the 'normal' curve is a
+reflection of reclassification as subjects go between the first and
+second state.
+
+\begin{figure}
+<<pmk4>>=
+plot(km1, fun='event', xscale=365.25, col=1:3, lwd=2, xmax=12*365.25,
+     xlab="Years from randomization", ylab="P(death)")
+lines(aj3a[4], col=1, lwd=2, lty=2, conf.int=FALSE)
+lines(aj3b[4], col=2, lwd=2, lty=2, conf.int=FALSE)
+lines(aj3c[4], col=3, lwd=2, lty=2, conf.int=FALSE)
+@ 
+  \caption{Standard Kaplan-Meier (solid) along with multi-state estimates of
+    survival for the PBC data.}
+  \label{pkm4}
+\end{figure}
+
+\subsection{Hazard models}
+We can repeat the same exercise with predicted curves from a Cox model.
+Figure \ref{pbccurve2} contains the overall KM as a reference, along with
+the predicted curve based on the fit using baseline values, and the fit using
+time-dependent covariaties.  
+In both cases these are for a subject with average covariate values. 
+The simple curve (dotted) is quite a bit below the KM, which is a consequence
+of the fact that $E(f(X)) \ne f(E(X))$ for any non-linear function $f$.
+The predicted survival curve from a Cox model is a quite non-linear
+function of the linear predictor $\eta$, we have drawn the curve for an
+average $\eta$.
+The marginal prediction from the model is an average of all $n=312$ predicted
+curves from the model, one for each subjects, and it is very close to the
+KM. (Not exactly identical due to differential follow-up and the PH assumption.)
+
+The prediction from the time-dependent model suffers from the same issue as
+the extendend KM: it is attempting to predict the survival of a subject who
+starts with these average covariate values, and then never changes.  
+The computational mechanism is different than the EKM estimate: all observations
+participate in creating a single baseline hazard estimate, and this is then used
+to predict the curve for a subject with constant covariates. 
+Whether said computation is justifiable or not, in our opinion the result 
+is simply not interesting.
+
+\begin{figure}
+<<pbccurve2>>=
+psurv1 <- survfit(Surv(futime, status==2) ~1, pdat0)
+dummy <- data.frame(age=50, bili=1.35, edema=0, albumin=3.5, protime=10.6)
+psurv2 <- survfit(pfit1, newdata=dummy)
+psurv3 <- survfit(pfit2, newdata=dummy)
+psurv4 <- survfit(pfit1, newdata=pdat0)
+psurv4$surv <- rowMeans(psurv4$surv)
+
+plot(psurv1, lwd=2, conf.int=FALSE, xscale=365.25, xmax=365.25*12, fun='event',
+     xlab="Years post enrollment", ylab="Death")
+lines(psurv2[1], lty=3, lwd=2,conf.int=FALSE, fun="event")
+lines(psurv3[1], lty=2, lwd=2, fun="event", conf.int=FALSE)
+lines(psurv4, lty=3, lwd=1,fun='event', conf.int=FALSE)
+@ 
+ \caption{Overall survival for the PBC dataset (dotted line), along with
+   predicted survival from the time-fixed (solid) and time-dependent
+   Cox models for a subject with median covariate values at enrollment: 
+   age, bilirubin, edema, albumin and prothrombin times of 50, 1.35, absent,
+   3.5 and 10.6, respectively.  The marginal curve is shown as a dotted line,
+   and is nearly coincident with the KM.}
+ \label{pbccurve2}
+\end{figure}
+
+A possible solution would be to create a marginal curve.
+The software allows for specification of a time-dependent covariate path,
+and will then produce the curve corresponding to that path.  Compute the
+curves for all $n$ patients and average them. 
+The problem with this idea is differential follow-up.  Subject 1, for instance,
+died at day 400.  Unless we are willing to project some hypothetical future
+covariate path for the observation, the predicted curve also stops after just
+over 1 year.  
+Taking a simple average, i.e., marginal(t) = mean of all curves defined at t,
+will certainly be discontinuous and may not even be monotone.
+
+Multistate models again offer a potential solution to the issue.
+Consider the following model:
+
+<<pbcm1, echo=TRUE>>=
+test <- survcheck(Surv(day1, day2, bstate) ~1, pdata, id=id, istate= bili3)
+test$transitions
+
+mfit1 <- coxph(list(Surv(day1, day2, bstate) ~ 1,
+                    c(1:3):"death" ~ age + edema + albumin +
+                        log(protime) / common + shared),
+               data= pdata,  id=id, istate= bili3)
+print(mfit1, digits=2)
+
+msurv1 <- survfit(mfit1,newdata=dummy, p0=c(1,0,0,0))
+
+test <- coxph(Surv(day1, day2, death) ~ age + edema + albumin + log(protime)
+              + bili3, data= pdata)
+@ 
+
+This is a more complex model.
+I have forced no covariates for the transitions between bilirubin
+states.  Bilirubin itself should not be a preditor of those, due to edge
+effects if nothing else, e.g., a subject with bili of 4.9 is more likely to
+transition to the 5+ state than someone with a bilirubin of 3 simply due to
+measurement variability.
+Proportional hazards has been assumed for the 3 transitions to death, resulting
+in scale factors of 1, 1.7, and 2.2. 
+Though not printed above, the coefficients and log likelihood of the test 
+fit are identical to mfit1.
+The advantage of mfit comes when we ask for a predicted survival curve:
+the bilirubin level is given as an intial state which then evolves over time,
+rather than a fixed numerical value which does not. The other three
+covariates still appear as time fixed variables, so this solution is incomplete,
+but it gives the flavor. 
+A plot of the death state for msurv1 corresponds to death for a hypothetical
+subject whose bilrubin can evolve but other variables remain fixed (perhaps
+even more uninterpreatable than the EKM).
+Bilirubin is by far the strongest predictor, however, and it is not surprising
+that the curve lies between the dashed and dotted lines of
+figure \ref{pbccurve2} (not shown).
+
+\subsection{Using age scale}
+
+\end{document}
