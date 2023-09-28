@@ -1,0 +1,136 @@
+---
+title: Suvival workshop, part 4
+author: Terry Therneau
+output: pdf_document
+---
+
+```{r, setup, echo=FALSE}
+library(knitr)
+knitr::opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
+               warning=FALSE, error=FALSE)
+library(survival)
+library(splines)
+```
+# MCSA
+I have learned a tremendous amount about multi-state models from an analysis
+of the Mayo Clinic Study of Ageing (MCSA) data.
+One paper's analysis in particular (doi: 10.1093/braincomms/fcac017) has a
+directory with 14 different 'exporatory' knitr files.
+
+```{r, anal}
+load("data/mcsa.rda")   # this data is not shared
+survcheck(Surv(age1, age2, state) ~ 1, data= mcsa, id= ptnum, istate= cstate)
+
+cfit1  <- coxph(list(Surv(age1, age2, state) ~ iclgp + apoepos + male +
+                         educ4 + icmc, 
+                    1:2 ~ iclgp:male + apoepos:male, 1:3 ~ yearc),
+                    id=ptnum, mcsa, istate= cstate)
+
+print(cfit1, digits=2)
+```
+
+```{r, fig.align='center', out.width='0.9\\linewidth'}
+include_graphics("figures/efig2.pdf")
+```
+
+```{r, fig.align='center', out.width='0.9\\linewidth'}
+include_graphics("figures/efig4.pdf")
+```
+
+```{r, fig.align='center', out.width='0.9\\linewidth'}
+include_graphics("figures/efig3.pdf")
+```
+
+Males have higher hazard of dementia,  equal lifetime risk, smaller sojourn 
+years.
+
+There are a lot of choices in this fit.
+* The amlyoid level is treated as categorical, to deal with missing.
+* An APOE by sex interaction is known from the literature, we sort of have to
+  add it.  The amyloid by sex interaction was also significant.
+* Age scale makes sense
+* There is an enrollment effect on the CU:death transition. But it doesn't
+work for the CU:dementia one, due to the 15 month visit interval.  We don't
+expect an enrollment time effect on dementia:death.
+* This fit used initial amyloid level and intial CMC, which I later realized
+was worrisome.
+
+# Time dependent covariates and age scale
+Some rules that I have stated over the years
+* TD covariates are very useful in Cox models
+* Survival curves + time dependent covariates doesn't make sense
+* Use landmark curves
+* Age scale is superior to entry scale for many problems
+* Multi-state models are preferred
+* In a mulit-state model, both HR and absolute risk are needed
+
+For the MCSA paper we have time dependent covariates that *will* rise for
+a lot of people (amyloid and CMC), age scale makes the most sense, absolute
+risk is critical.  But: the landmark approach no longer makes sense.
+
+```{r, amyloid}
+alldat <- readRDS("data/MCSA-all-visits.rds")
+mdata <- subset(alldat, !is.na(pzmemory) & agevis > 50 & !is.na(apoepos), 
+                c(clinic, agevis, cyclenum, date, male, educ, apoepos, pzmemory,
+                  pzglobal, spm12.pib.ratio, spm12.tau.ratio, 
+                  pibdate, taudate,testnaive))
+temp <- c("agevis", "spm12.pib.ratio", "spm12.tau.ratio")
+names(mdata)[match(temp, names(mdata))] <- c("age", "pib", "tau")
+
+ptemp <- subset(mdata, !is.na(pib))
+acount <- table(ptemp$clinic)
+# use a subset of all those with 4 or more
+id4 <- names(acount)[acount >3]
+temp4 <- subset(ptemp, clinic %in% id4)
+
+# spread out over age
+temp <- id4[order(temp4$age[!duplicated(temp4$clinic)])]
+id4b <- temp[seq(1, length(temp), length=60)]
+
+plot(pib ~ age, temp4, subset=(clinic %in% id4b),
+     log='y', type='n',  xlab="Age", ylab="Amyloid")
+for (i in 1:length(id4b)) {
+    lines(pib ~ age, temp4, subset= (clinic== id4b[i]), lwd=2,
+         col= 1 + i%%5, lty= 1)
+}
+```
+
+Problem:
+* consider the risk set for a dementia at age 82.35
+* amyloid-at-baseline as a covariate
+* for some subjects that value is 1 month old, for some 10 years old.
+* what does the amyloid HR mean?
+
+Say you had a variable $X$ that is going up for everyone over time, and that true
+risk depends on the *current* value of $X$. 
+In an entry time analysis, in a risk set at 10 years all the baseline $X$ values
+are out of date, but perhaps they are still approximately correctly ordered.
+
+The COX PL term can always be recentered
+$$
+	\frac{e^{\beta x_i}}{\sum_j e^{\beta x_j}} = 	
+		\frac{e^{\beta (x_i -c)}}{\sum_j e^{\beta (x_j -c)}}
+$$
+so the HR only depends on differences in $X$.
+This back of the envelope justification doesn't work on age scale, we really
+should use the current values of $X$.
+
+A second point is the splicing problem.  When I create a curve for the expected
+future state of someone who is currently 65.
+* at age 80, this will involve subjects enrolled at age 70+ (no one has 20 years
+of fu)
+* The future for a low amyloid subject will use the risk of someone who was
+low amyloid when they were enrolled.  The curve will by systematically too
+good.
+* We inherit the EKM flaws without noticing.
+
+Poisson approx
+* divide age into 5 year bins
+* within each bin compute rates as a function of sex, APOE, amyloid, CMC
+* for someone age 60 with low amyloid, compute the future state probs
+* take a weighted average of hazards at each age
+
+To do
+* multi-state model
+* additive log hazards?
+
