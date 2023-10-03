@@ -1,0 +1,410 @@
+\documentclass{article}[11pt]
+\usepackage{amsmath}
+\addtolength{\textwidth}{1in}
+\addtolength{\oddsidemargin}{-.5in}
+\setlength{\evensidemargin}{\oddsidemargin}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\title{General Models}
+\author{Terry Therneau}
+\date{2 Oct 2023}
+
+\begin{document}
+\maketitle
+
+<<setup, echo=FALSE>>=
+library(knitr)
+opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
+               fig.width=4.5, fig.height=3, fig.path="figures/",
+               device="pdf", dev.args=list(pointsize=8),
+               cache=FALSE,   background="#ffffff",
+               warning=FALSE, error=FALSE, message=FALSE, prompt=TRUE,
+               strip.white=FALSE, mymar=TRUE)
+options(contrasts= c("contr.treatment", "contr.poly"),
+        show.signif.stars = FALSE, continue=" ", width=65)
+
+# because "mymar" is set to TRUE above, this hook will be run on every chunk.
+# it sets the margins, font, etc to values that work
+knit_hooks$set(mymar= function(before, options, envir) {
+    if (before) {
+        look.for <- c("mar", "font", "cex")  # options we want
+        plist <- options[match(look.for, names(options), nomatch=0)]
+        if (is.null(plist$mar)) plist$mar <- c(4, 4, .5, .5)
+        if (is.null(plist$cex)) plist$cex <- 1
+        do.call("par", plist)
+    } else NULL
+})
+
+table2 <- function(...) table(..., useNA = "ifany")
+library(survival)
+library(splines)
+@
+
+\section{Some software notes}
+
+The Aalen-Johansen estimate is 
+\begin{equation*}
+  p(t) = p(0) \prod_{s \le t} T(s)
+\end{equation*}
+where p(0) is a vector of length $k$ = number of states containing the starting
+distribution (adds to 1).
+
+At each time $s$ for which a transition occurs, $T(s)$ is the simple transition
+matrix:
+\begin{itemize}
+  \item Row 1 = disposition of all those in state 1 just before time $s$:
+      (fraction who go to state 1, fraction who go to state 2, \ldots)
+  \item Row 2 = disposition of all those in state 2 just before time $s$:
+      (fraction who go to state 1, fraction who go to state 2, \ldots)
+  \item etc
+  \item Each row sums to 1, all elements are $\ge 0$
+  \item If a state $j$ has 0 subjects, set $T_{jj} =1$.  
+    (Makes the computation happy)
+\end{itemize}
+
+If everyone starts in the same state, we normally make that be state 1 and
+$p(0) = (1, 0, 0, \ldots)$.
+
+For the survfit program:
+\begin{enumerate}
+  \item The user can set $p(0)$ to anything they want.  You then get an estimate
+    of the future probability distribution for a population who all started in
+    that state.  Defaut is the observed starting distribution.
+  \item  The user can set start.time to anything they want.  This causes only
+    the $T$ matrices at or after that time to be used.
+\end{enumerate}
+I have found these very useful.  
+
+For the coxph program, consider
+\begin{verbatim}
+  coxph(Surv(time1, time2, state) ~ x1 + x2 + x3, data=zed, id=patient)
+\end{verbatim}
+The default is
+\begin{enumerate}
+  \item Each observed transtion type is a separate stratum (separate Cox model)
+  \item Each model has the same covariates
+\end{enumerate}
+
+A more complex form is
+\begin{verbatim}
+  coxph(list(Surv(time1, time2, state) ~ x1 + x2 + x3,
+             1:2 + 1:3 ~ x1*x2 ,
+             2:4 + 3:4 ~ x5 + log(x6) / common),
+        data= zed, id = patient)
+\end{verbatim}
+
+\begin{enumerate}
+  \item The first line of the list is the default formula.
+  \item Line 2 says that two of the transitions also get the interaction x1*x2
+  \item Line 3 says that 2 other states have the x5 and x6 terms, and that
+    the coefficients for those two are identical.
+  \item Another option is 'shared', which states that the set of transitions
+     has a shared baseline hazard.  This is the opposite of the single state
+     coxph model where strata() forces different hazards.  Here the default is
+     to have different ones and the shared statement undoes it.
+  \item You can have  \code{/common + shared}.
+  \item Shared (proportional) hazard and identical hazard are not the same.
+\end{enumerate}
+
+I am still learning what can be done with these options.
+
+\section{Fatty liver disease}
+
+
+Non-alcoholic fatty liver disease (NAFLD) is defined by three criteria:
+presence of greater than 5\% fat in the liver (steatosis),
+absence of other indications for the steatosis such as excessive
+alcohol consumption or certain medications, and absence of other 
+liver disease.
+NAFLD is currently responsible for almost 1/3 of
+liver transplants and it's impact is growing, it is expected to be a major
+driver of hepatology practice in the coming decade,
+driven at least in part by the growing obesity epidemic.
+The \code{nafld} data set includes all patients with a NAFLD 
+diagnosis in Olmsted County,
+Minnesota between 1997 to 2014 along with up to four age and sex matched 
+controls for each case. 
+
+We will model the onset of three important components of the metabolic
+syndrome: diabetes, hypertension, and dyslipidemia, using the model shown
+below.  Subjects have either 0, 1, 2, or all 3 of these metabolic comorbidities.
+
+\begin{figure}
+<<state5>>=
+state5 <- c("0MC", "1MC", "2MC", "3MC", "death")
+tmat <- matrix(0L, 5, 5, dimnames=list(state5, state5))
+tmat[1,2] <- tmat[2,3] <- tmat[3,4] <- 1
+tmat[-5,5] <- 1
+statefig(rbind(4,1), tmat)
+@ 
+  \caption{State space figure for NAFLD.}
+  \label{state5}
+\end{figure}
+
+\subsection{Data}
+The NAFLD data is represented as 3 data sets, \code{nafld1} has one observation
+per subject containing basline information (age, sex, etc.),
+nafld2 has information on repeated laboratory tests, e.g. blood pressure,
+and nafld3 has information on yes/no endpoints.
+After the case-control set was assembled, we removed any subjects with less
+than 7 days of follow-up.  These subjects add little information, and it
+prevents a particular confusion that can occur with a multi-day medical visit
+where two results from the same encounter have different dates.
+To protect patient confidentiality all time intervals are in days since
+the index date; none of the dates from the original data were retained.
+Subject age is their integer age at the index date, and the subject
+identifier is an arbitrary integer. 
+
+Start by building an analysis data set using \code{nafld1} and \code{nafld3}.
+
+<<nafld1, echo=TRUE>>=
+ndata <- tmerge(nafld1[,1:8], nafld1, id=id, death= event(futime, status))
+ndata <- tmerge(ndata, subset(nafld3, event=="nafld"), id, 
+                nafld= tdc(days))
+ndata <- tmerge(ndata, subset(nafld3, event=="diabetes"), id = id,
+                diabetes = tdc(days), e1= cumevent(days))
+ndata <- tmerge(ndata, subset(nafld3, event=="htn"),  id = id,
+                htn = tdc(days), e2 = cumevent(days))
+ndata <- tmerge(ndata, subset(nafld3, event=="dyslipidemia"), id=id,
+                lipid = tdc(days), e3= cumevent(days))
+ndata <- tmerge(ndata, subset(nafld3, event %in% c("diabetes", "htn", 
+                                                   "dyslipidemia")), 
+                id=id, comorbid= cumevent(days))
+summary(ndata)
+@ 
+
+<<echo=FALSE>>=
+tc <- attr(ndata, 'tcount')   # shorter name for use in Sexpr below
+icount <- table(table(nafld3$id)) #number with 1, 2, ... intervals
+ncount <- sum(nafld3$event=="nafld")
+@ 
+
+A model for the tmerge function is to imagine a drawer with index cards (like an
+old library card catalog).
+\begin{itemize}
+  \item Start with one card per subject, containing a start time, end time,
+     covariate values, and events.  
+  \item Make additions one at a time. Each addition has an id,a time point,
+    and a type of addition: a new variable value or new event.
+    \begin{itemize}
+      \item The id must already exist.
+      \item If the timepoint lies within the time range of a card, replace that
+        card with two: (old start, new time), (new time, old end). A new event
+        is added to the first card, a new covariate value to the second.
+        A new variable name or event is propogated to all cards for a subject.
+      \item If the time point aligns with the start/end of a current card or
+        cards, update them.
+    \end{itemize}
+\end{itemize}
+
+The summary function tells us a lot about the creation process.
+Each addition of a new endpoint or covariate to the data generates one 
+row in the table.  Column labels are explained by figure \ref{fig:timeline}.
+\begin{itemize}
+  \item There are \Sexpr{tc[1,7]} last fu/death additions, 
+    which by definition fall at the
+    trailing end of a subject's observation interval: they define the
+    interval.
+  \item There are \Sexpr{tc[2,2]} nafld splits that fall after the end
+    of follow-up (`late').
+    These are subjects whose first NAFLD fell within a year of the end of
+    their time line, and the one year delay for ``confirmed'' pushed them
+    over the end.  (The time value in the \code{nafld3} data set is 1 year
+    after the actual notice of NAFLD; no other endpoints have this
+    offset added).  The time dependent covariate \code{nafld} never turns
+    from 0 to 1 for these subjects. 
+    (Why were these subjects not removed earlier by my ``at least 7 days of
+    follow-up'' rule?  They are all controls for someone else and so appear
+    in the data at a younger age than their NAFLD date.)
+  \item \Sexpr{tc[2,4]} subjects have a NAFLD diagnosis between time 0
+    and last follow-up.
+    These are subjects who were selected as matched controls for another
+    NAFLD case at a particular age, and later were diagnosed with NAFLD 
+    themselves.
+   \item \Sexpr{tc[3,1]} of the diabetes diagnoses are before entry, i.e., 
+    these are the prevalent cases.  One diagnosis occurred on the day of
+    entry (``leading''), and will not be counted as a post-enrollment endpoint,
+    all the other fall somewhere between study entry and last follow-up.
+  \item Conversely, \Sexpr{tc[5,7]} subjects were diagnosed with hypertension
+    at their final visit (``trailing'').  These will be counted as an
+    occurrence of a hypertension event (\code{e2}), but the time dependent 
+    covariate \code{htn} will never become 1. 
+  \item \Sexpr{tc[9,8]} of the total comorbidity counts are tied. These are
+    subjects for whom the first diagnosis of 2 of the 3 conditions
+    happened on the same office visit, the cumulative count will jump by 2.
+    (We will see below that 4 subjects had all 3 on the same day.)
+    Many times ties indicate a data error.
+\end{itemize}
+
+Such a detailed look at data set construction may seem over zealous.   
+Our experience is that issues with covariate and event timing
+occur in nearly all data sets, large or small.  The 13 NAFLD cases ``after
+last follow-up'' were for instance both a surprise and a puzzle to us;
+but we have learned through experience that it is best not to proceed until
+such puzzles are understood.  (This particular one was benign.)
+If, for instance, some condition is noted at autopsy, do we want the related
+time dependent covariate to change before or after the death event?
+Some sort of decision has to be made, and it is better to look and understand
+than to blindly accept an arbitrary programming default.
+
+\subsection{Fits}
+Create the covariates for current state and the analysis endpoint.
+It is important that data manipulations like this occur \emph{after}
+the final \code{tmerge} call.  
+Successive \code{tmerge} calls keep track of the time scale, time-dependent and
+event covariates, passing the information forward from call to call, 
+but this information is lost when the resulting data frame is manipulated.  
+(The loss is intentional: we won't know if one of the tracked variables has
+changed.)
+
+The \code{tmerge} call above used the cumevent verb to count comorbidities, 
+and the first
+line below verifies that no subject had diabetes, for instance, coded more than
+once.  For this analysis we think of the three conditions as one-time outcomes,
+you can't get diabetes twice.  When the outcome data set is the result of
+electronic capture one could easily have a diabetes code at every visit,
+in which case the cumulative count of all events would not be
+the total number of distinct comorbidities.
+In this particular data set the diabetes codes had already been preprocessed
+so that the data set contains only the first diabetes diagnosis, and likewise
+with hypertension and dyslipidemia.  
+(In counterpoint, the nafld3 data set has multiple myocardial infarctions for 
+some subjects, since MI can happen more than once.)
+
+<<nafld2>>=
+with(ndata, if (any(e1>1 | e2>1 | e3>1)) stop("multiple events"))
+ndata$cstate <- with(ndata, factor(diabetes + htn + lipid, 0:3, 
+                                   c("0mc", "1mc", "2mc", "3mc")))
+temp <- with(ndata, ifelse(death, 4, comorbid))
+ndata$event <- factor(temp, 0:4, 
+         c("censored", "1mc", "2mc", "3mc", "death"))
+ndata$age1 <- ndata$age + ndata$tstart/365.25   # analysis on age scale
+ndata$age2 <- ndata$age + ndata$tstop/365.25
+
+check1 <- survcheck(Surv(age1, age2, event) ~ nafld + male, data=ndata, 
+                   id=id, istate=cstate)
+check1
+@
+
+This is a rich data set with a large number of transitions:
+over 1/4 of the participants have at least one event, and there
+are \Sexpr{check1$events[5,5]} subjects who transition through all 5 
+possible states (4 transitions).
+Subjects do not all enter the study in the same
+state; about 14\% have diabetes at the time of recruitment, for instance.
+One major difference between current state and outcome is that the
+current state endures across intervals: it is based on \code{tdc} variables
+while the outcome is based on \code{event} operators.
+If a subject has time-dependent covariates, there may be intermediate
+intervals where a covariate changed but an outcome did not occur;
+current state will endure across intervals but the intermediate outcome will
+be ``censor''.
+
+We see a number of subjects who ``jump'' states, e.g., directly from 0 to
+2 comorbidities.  
+This serves to remind us that this is actually a model of time
+until \emph{detected} comorbidity; which will often have such jumps even if
+the underlying biology is continuous.
+The data look like the figure below, where the dotted lines are 
+transformations that we observe, but would not be present if the subjects were
+monitored continuously.
+A call to the \code{survcheck} routine is almost mandatory for a complex 
+setup like this,
+to ensure that the data set which has been built is what you intended to build.
+
+Calling \code{survcheck} with \textasciitilde 1 on the right hand side or with
+the covariates for the model on the right hand side will potentially give different
+event counts, due to the removal of rows with a missing value. 
+Both can be useful summaries.
+For a multi-state coxph model neither may be exactly correct, however.  If the model
+contains a covariate which applies only to certain transitions, then events that
+do not depend on that covariate will be retained, 
+while event occurences that do depend on the covariate
+will be dropped, leading to counts that may be intermediate between
+the two survcheck outputs.
+
+\begin{figure}
+<<nafld3>>=
+states <- c("No comorbidity", "1 comorbidity", "2 comorbidities", 
+            "3 comorbitities", "Death")
+cmat <- matrix(0, 5,5)
+cmat[,5] <- 1
+cmat[1,2] <- cmat[2,3] <- cmat[3,4] <- 1
+cmat[1,3] <- cmat[2,4] <- 1.6
+cmat[1,4] <- 1.6
+dimnames(cmat) <- list(states, states)
+statefig(cbind(4,1), cmat, alty=c(1,2,1,2,2,1,1,1,1,1,1))
+@
+ \caption{Augmented state space figure.}
+ \label{nafld3}
+\end{figure}
+
+Since age is the dominant driver of the transitions we have chosen to 
+do the fits directly on age scale rather than model the age effect.
+We force common coefficients for the transitions from 0 comorbidities to
+1, 2 or 3, and for transitions from 1 comorbidity to 2 or 3.
+This is essentially a model of ``any progression'' from a given state.
+We also force the effect of male sex to be the same for any transition
+to death. 
+
+<<nafld4, echo=TRUE>>=
+nfit1 <- coxph(list(Surv(age1, age2, event) ~ nafld + male,
+                    "0mc":state("1mc", "2mc", "3mc") ~ nafld+ male / common,
+                     2:3 + 2:4   ~ nafld + male / common,
+                     0:"death" ~ male / common),
+               data=ndata, id=id, istate=cstate)
+@ 
+
+A list has been used as the formula for the \code{coxph} call.
+The first element is a standard formula, and will be the default for
+all of the transitions found in the model.
+Elements 2--4 of the list are pseudo formulas, which specify a set of
+states on the left and covariates on the right, along with the optional
+modifier \code{/common}.
+As shown, there are multiple ways to specify a set of transitions either by
+name or by number, the value 0 is shorthand for ``any state''.
+The coefficient matrix reveals that the 1:2, 1:3, and 1:4 transitions all
+share the same coefficients, as intended.
+
+\begin{table} \centering
+  \begin{tabular}{ccccc}
+  & \multicolumn{2}{c}{NAFLD} & \multicolumn{2}{c}{Male} \\
+  & HR & p & HR & p \\ \hline
+<<ch11nafld3, results='asis'>>=
+temp <- summary(nfit1)$coefficients
+temp1 <- matrix(0, nrow=7, ncol=4)
+temp1[,1:2] <- temp[c(1,3,5,7, 9:11), c(2, 6)]
+temp1[,3:4] <- temp[c(2,4,6,8,8, 8, 8),c(2,6)]
+
+temp2 <- matrix("", 7,4)
+temp2[,c(1,3)] <- format(round(temp1[,c(1,3)], 2))
+temp2[,c(2,4)] <- format.pval(temp1[,c(2,4)], 2, eps=.001) 
+tlab <- c("0:1-3", "1:2:3", "2:3", "0:death", "1:death", "2:death", "3:death")
+for (i in 1:6) cat(tlab[i], "& ", paste(temp2[i,], collapse=" & "), "\\\\ \n")
+cat(tlab[7], "&", paste(temp2[7,], collapse= " & "), "\n")
+@ 
+  \end{tabular}
+  \caption{Estimated hazard ratio and p-values for the multistate model.}
+  \label{ch11-nafld3}
+\end{table}
+
+
+\begin{figure}
+<<nafig>>=
+dummy <- expand.grid(nafld=0:1, male=0:1)
+nsurv <- survfit(nfit1, newdata=dummy, start.time=50, p0=c(1,0,0,0,0))
+temp <- summary(nsurv, rmean=100)$table
+rmat <- matrix(temp[,'rmean'], ncol=4, byrow=TRUE)
+colnames(rmat) <- c("Female, Normal", "Female, MAFLD", "Male, Normal",
+                    "Female, MAFLD")
+oldpar <- par(mar=c(5,9,1,1))
+barplot(rmat[, c(2,1,3,4)], horiz=TRUE, xlim=c(0,50), 
+        col=c("green","orange", "red", "darkred", "white"), las=1,
+             xlab="Years in state, from age 50")
+@ 
+  \caption{Predicted mean time in state for the MAFLD data. From left to
+    right are 0, 1, 2, 3 cormorbidities, and death (white).}
+  \label{nafig}
+\end{figure}
+
+\end{document}
