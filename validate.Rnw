@@ -1,0 +1,1133 @@
+\documentclass{article}[11pt]
+\usepackage{amsmath}
+\addtolength{\textwidth}{1in}
+\addtolength{\oddsidemargin}{-.5in}
+\setlength{\evensidemargin}{\oddsidemargin}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\yhat}{\hat y}
+\newcommand{\etahat}{\hat \eta}
+\newcommand{\xbar}{\overline{x}}
+\newcommand{\Lhat}{\hat \Lambda}
+\newcommand{\phat}{\hat p}
+
+\title{External Validation}
+\author{Terry Therneau}
+\date{4 October 2023}
+
+\begin{document}
+\maketitle
+
+<<setup, echo=FALSE>>=
+library(knitr)
+opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,
+               fig.width=4.5, fig.height=3, fig.path="figures/",
+               device="pdf", dev.args=list(pointsize=8),
+               cache=FALSE,   background="#ffffff",
+               warning=FALSE, error=FALSE, message=FALSE, prompt=TRUE,
+               strip.white=FALSE, mymar=TRUE)
+options(contrasts= c("contr.treatment", "contr.poly"),
+        show.signif.stars = FALSE, continue=" ", width=65)
+
+# because "mymar" is set to TRUE above, this hook will be run on every chunk.
+# it sets the margins, font, etc to values that work
+knit_hooks$set(mymar= function(before, options, envir) {
+    if (before) {
+        look.for <- c("mar", "font", "cex")  # options we want
+        plist <- options[match(look.for, names(options), nomatch=0)]
+        if (is.null(plist$mar)) plist$mar <- c(4, 4, .5, .5)
+        if (is.null(plist$cex)) plist$cex <- 1
+        do.call("par", plist)
+    } else NULL
+})
+
+table2 <- function(...) table(..., useNA = "ifany")
+library(survival)
+library(splines)
+@ 
+  
+\section{Background}
+
+(Note: this chapter still has a lot places that need to be fleshed out,
+but the basic structure is sound.)
+\subsection{What does it mean to validate a model?}
+\begin{quote}
+ If you don't know where you are going, you might end up somewhere else.
+Yogi Berra
+\end{quote}
+
+Validation is a word that is often used but rarely defined, so much so
+that it has become essentially meaningless without further clarification.
+We will separate 3 meanings
+\begin{itemize}
+  \item Software validation.  This is discussed in appendix \ref{sect:softval}.
+  \item Internal validation: checks that further examine the fit of a
+          model, using the original data set.  These form an extension of
+          the familiar trio of functional form, proportional hazards, and
+          undue leverage which have been discussed earlier. 
+          Several of the methods
+          found in this chapter will have been encountered earlier in the book,
+          in that context.
+  \item External validation. Application of a model to new data set, one which
+    was not used in the model's construction.
+\end{itemize}
+
+External validation tries to answer the question of whether a particular model
+is applicable outside of the data set it where it was developed.
+The most critical step, before computing metrics,
+is to carefully think through what we mean by ``applicable''.
+In what sense does a given model provide, or not provide, a useful 
+prediction? 
+Any careful answer to this will always be problem specific.
+One consequence is that
+this chapter will contain ideas on how to \emph{think} about the problem
+and methods, but no final checklist with a ``best'' solution.
+
+This key consideration is surprisingly absent from most papers on the topic
+of survival model validation; two notable exceptions which have greatly
+influenced our thinking are 
+Korn and Simon \cite{Korn90} and Alman and Royston \cite{Altman00}.
+As an example from the first, suppose that we were using $t - \hat t$ as
+the metric for goodness of prediction, the difference between the observed
+and predicted time to death.
+Should an (observed, predicted) pair of (.5y, 1y) be treated as the same size 
+error as (10.5y, 11y)?  
+In a study of acute disease we might consider the first
+pair to be a much more consequential error than the latter.  For example,
+in a cancer in which  5 year survival is considered a ``cure'', one might
+consider any pair $(a, b)$ with both $a$ and $b$ greater than 5 to be no
+error at all. 
+Another example would be a model which will be used
+to guide a transition to palliative care, e.g., if the predicted probability of
+death within 2 months were over 90\% then further treatment is 
+considered to be futile.  In this case distinguishing between
+those with an early death rate of 10, 30 or 50\% is immaterial for the planned
+application.
+
+In general, the chosen validation metric needs to be \emph{fit for purpose}.
+One of the most common outcomes of such a consideration, in our experience,
+will be to restrict the upper range of the assessment to a threshold
+$\tau$; this could be 3 months or 10 years depending on the case at hand,
+and will be a consideration in each of our examples.
+A companion issue is that the validation data set might have very
+little information beyond some point; if only a handful of the validation
+subjects have more than 4 years of follow-up, for instance, then an assessment
+of predictive ability at 10 years will be a fool's errand, whether or not that
+were a target of interest.  
+
+\subsection{Data checks}
+A few checks of the validation data should be done early in the process.
+These include a Kaplan-Meier plot of the outcome, overall or by subgroups,
+numerical and/or graphical summaries of each of the predictor variables found
+ in the reference model, and a refit of the reference  model using the new data.
+The goal of this is not validation per se, but to uncover simple data issues
+such as a lab test in different units,  a different range of subjects, 
+or a change in time scale.  
+
+\section{Targets}
+The next question is what estimate to use as a numerical target for our
+efforts.
+For a survival outcome there are four obvious targets: the time to event $t_i$
+for each validation subject along with a predicted time $\hat t_i$, 
+the observed and prediced number of events up to the target time, the
+observed and predicted survival at the target time,  or the simple
+linear predictor itself $\hat \eta_i = X_i\hat \beta$.  
+(For a Cox model $\exp(\hat\eta)$ will be the hazard ratio).
+A second choice that needs to be made is whether to use a summary 
+based on relative prediction or absolute prediction,
+commonly denoted as \emph{discrimnation} and \emph{calibration}.
+
+Discrimination measures whether the outcomes for two subjects are in the same
+relative order as the predicted values for that pair of subjects.  
+In many cases this is sufficient, for instance if the prediction will be used
+to stratify treatment assignment of subjects in a new trial, then
+only the relative ordering of their risk is required.
+Individual patient counseling, on the other hand, will require absolute
+predictions for that patient.
+Likewise, predicted sample size for a trial with a survival endpoint depends
+on the eventual \emph{number} of events that will occur, a task that also 
+requires absolute predictions.
+
+A particular advantage of discrimination for a Cox model is that we don't
+need to decide between $\hat t$, $\hat N$, $\hat S$ or $\hat \eta$: 
+the order of any one
+of these completely determines the order of all the others, i.e.,
+if $\hat\eta_i > \hat\eta_j$ then $\hat S_i(t) < \hat S_j(t)$ for all times
+$t$.
+Most literature reports will omit the baseline hazard of a Cox model fit,
+and without
+this only $\hat\eta$ can be computed; this allows for discrimination but
+not calibration.  This will be discussed more fully in the examples.
+
+\section{Discrimination}
+The primary tool for discrimination is the concordance statistic
+\begin{equation}
+  C = Pr(y_i > y_j | \hat y_i > \hat y_j)
+\end{equation}
+where for this paragraph we are using $y$ and $\yhat$ as generic stand-ins for 
+whichever outcome is the focus.  
+Basic features of concordance are:
+\begin{itemize}
+  \item Kendall's $\tau$-a, Kendall's $\tau$-b, Goodman's $\gamma$, 
+    and Somers' $d$ (or $D$ or $D_{xy}$ depending on the reference) 
+    represent different
+    choices of how to deal with tied values in $y$ or $\yhat$, but target the
+    same population quantity.
+    These measures range from -1 to 1.
+  \item The concordance $C$ ranges from 0 to 1, and $C = (D_{xy}+1)/2$,
+    a rescaled version of Somers' $d$.
+  \item If $y$ is a 0/1 binary outcome, then $C$ = the area 
+    under the receiver operating curve (AUROC).
+  \item Harrell \cite{xxx} proposed an extension of $C$ to censored outcomes.
+    Essentially, we only score those pairs of observations where the ordering
+    is certain.  The pair of times (10+, 20) for instance is one such, 
+    censored at 10 and and event at 20.  We do not know if the first 
+    observation's event time will be before or after the second. (Note that
+    censoring does not afflick predicted values $\yhat$.)
+\end{itemize}
+
+A natural interpretation of concordance is to consider the evaluation of
+an oracle --- a subject matter expert, a statistical prediction tool, a
+tarot deck, \ldots --- by presenting subjects 2 at a time.  For each 
+pair count whether the oracle correctly predicts the order of their final
+outcome, concordance is the overall fraction correct.
+ Pairs with a tied outcome are not presented, as they are
+uninformative with respect to evaluation.  If the oracle cannot decide
+give a score of 1/2.
+A random die throw will have $C= 1/2$ and a perfect oracle $C =1$,
+values $<.6$ from a statistical model are normally not very impressive.
+Values $<1/2$ are possible (consider some political pundits),
+
+It turns out that there is a very close association between the concordance
+and standard test statistics for survival data.  The latter can be written
+as a sum of terms, one for each event or death time
+\begin{equation}
+  Q = \sum_{i\in d} w(t_i) (x_i(t_i) - \xbar(t_i)) \label{teststat}
+\end{equation} 
+where $t_i$ is the event time of the death, $w$ is a time-dependent weight,
+$x_i$ is the covariate vector of the event (possibly time dependent) 
+and $\xbar$ is the mean covariate vector over all those at risk.
+\begin{itemize}
+  \item With $w$ =1 $Q$ is the score statistics for a Cox model.
+  \item With $x$ a 0/1 treatment indictor and $w(t) = n(t)$, the number at
+    risk at time $t$, $Q$ is the Gehan-Wilcoxon test.
+  \item Let $x_i(t)= r_i(t)$ be the rank of the risk score $\eta_i$ amongst 
+    all those at risk at time $t$, $0 \le r \le 1$ and $w = n(t)$.  Then
+    $Q$ is the numerator of the concordance $C$.
+  \item Many variations of the Gehan-Wilcoxon have been made over
+    the years, including $w(t) = S(t)$ (Peto and Peto), $w(t) = S/G$
+    (Schemper), $w(t) =1$ (log-rank), the $\gamma-\rho$ family (Fleming and
+    Harrington), the Tarone-Ware, and others.  We can apply any of these
+    weights to the concordance as well.  The modified concordance suggested
+    by Uno \cite{Uno11}, in fact, is exactly the Schemper weights.
+  \item As consequence of the Cox model equivalence, all these versions of $C$ 
+    immediately generalize to time-dependent covariates.
+\end{itemize}
+
+This set of interconnections is not widely appreciated.
+Several of them became clear in programming the survival package, i.e., 
+deja vu moments we we realized that ``I have seen this computation before'',
+and is the motivation for the quote above. 
+
+If the decision is made to limit an assessment of validation to the
+time interval $0-\tau$ per the considerations above, the concordance statistic
+can be similarly limited. This is a direct option in some software, or can
+be accomplished by artificially censoring any observed validation times that are
+greater than $\tau$.
+In our experience, large differences between the various flavors of 
+the concordance statistic only arise when the number at risk becomes small;
+differences are often negligible when an upper limit has been applied.
+This parallels the older debates about a ``best'' test statistic, where the
+final result has been that, outside certain edge cases, there is little
+practical difference.
+
+
+\section{Calibration}
+Multiple metrics have been proposed as measurements of calibration. 
+The key concern, in all cases, is how to best handle censored observations in
+the validation data set.
+As a trivial example, consider using $cor(t_i, \hat t_i)$ as a measure, the
+correlation between the observed and predicted survival time.  But what
+do you do with someone censored at $t_i= 1.5$ years with a prediction survival
+of $\hat t_i =3$?  
+
+I organize the methods into 4 groups, and will consider each in turn.
+\begin{enumerate}
+  \item Comparison of the total number of observed deaths in
+    the validation group to the expected number predicted by
+    the model, each subject's prediction is taken at the time of their last
+    follow-up (or event). This
+    are closely related to the standarized incidence ratio SIR, common in
+    epidemiology, but less well known in statistics.  It also has a close 
+    connection to counting processes.
+  \item Binomial methods, which compare the observed probability of survival
+    to a selected time $\tau$ to the expected proportion. 
+    The methods are a 2 step process: first modify the censored data so as to
+    obtain uncensored binomial observations, then apply standard approaches to
+    the modified data.
+    The first step can be based on inverse probability of censoring
+    weights (IPCW), imputation, or psueudo values.
+    This is by far the most common approach due to its familiarity.  
+  \item Survival methods.  A survival model is fit to the validation data set;
+    this deals with censored values in a natural way. 
+    Predicted values from this new model compared to the predictions from
+    the target model. 
+  \item Ignore the censoring; a bad idea which is unfortunately not uncommon.
+\end{enumerate}
+
+\subsection{Counting process approach}
+The focus of this approach is to compare observed to expected events.
+The underlying approach is based on 4 simple ideas.
+Assume that $F(t)$ is the cumulative distribution function for the
+ continuous random variable $T$.  Then
+\begin{enumerate}
+   \item $F(T) \sim U(0,1)$.  This is a standard statistical result.
+   \item  $\Lambda(T) \sim \exp(1)$, the cumulative hazard has an
+     exponential distribution.  This follows from the fact that the
+     hazard function satisfies $H= -\log(1-F)$, and that -log of a uniform
+     random variable is exponential.
+  \item If the censoring time $C$ is independent of $T$ and $Y= \min(C,T)$
+    is the censored survival time, then $\Lhat(Y)$ is distributed as a censored
+    exponential.
+   \item If a model is correct, then $\Lhat_i(t_i)$, will also follow a censored
+     exponential, where $\Lhat$ is the predicted cumulative hazard from the 
+     statistical model.
+\end{enumerate}
+
+Using the last statement above, along with the relationship between the
+Poisson and exponential distributions, allows for a simple computational
+tool for validation.  That is, a simple Poisson GLM model with the 
+per-subject event
+count as the response (the 0/1 status variable), and $-\log(\Lhat(t_i))$
+as the offset.
+
+Berry \cite{Berry83} derives the above approach, applied to the case where
+$\Lhat$ is based on population death rate tables, and shows that the
+Poisson likelihood is correct up to a constant factor. 
+A more modern derivation can be based on counting process theory; 
+A validation approach $\Lhat$ from a fitted Cox model was outlined in 
+\cite{Crowson16}.
+The intercept term from the GLM  model is then an estimate of $\log(O/E)$.
+
+This ratio $O/E$, where $O$= observed number of events up to $\tau$ and
+$E$ = expected number= $\sum \Lhat_i(\min(t_i, \tau)$ is known as
+a standardized incidence ratio (SIR) and has long usage in population science.
+Keiding and Clayton \cite{Keiding14} trace the SIR's history through multiple
+disciplines and journals for over 200 years.
+It is, however, less familiar in the survival literature.
+
+\subsection{Binomial methods}
+\paragraph{IPC weights}
+The redistribute to the right (RTTR) algorithm was elaborated in section 
+\ref{rttr}. 
+If we apply the RTTR algorithm to the validation data, up
+to time $\tau$,
+the result is that all of the observations with unknown $\tau$ year outcome
+now have a weight of zero and can be dropped.
+The final data set now has an ordinary binomial outcome $d_i$ =1 for
+a death and 0 for alive, with remaining weights $w_i \ge 1$.
+If the censoring is independent of outcome, we expect the results of this
+process to be unbiased.
+
+This is equivalent to using inverse probability of censoring (IPC) weights,
+based on a reversed Kapan-Meier estimate of $G(t)$ the censoring distribution.
+More generally, per-subject estimates $G_i$ can be obtained using a
+sub-model to predict the censoring probability.  This will be more resistant
+to covariate dependent censoring.
+
+\paragraph{Imputation}
+The IPC method removes subjects censored before $\tau$, and alternative is to
+replace their outcome with an imputated value.  
+In the simplest form, for someone censored at $t$ use the conditional probability
+of survival to $\tau$ of $p_i= S(\tau)/S(t_i)$ based on the usual Kaplan-Meier.
+Either replace the observation's response with $p_i$ or two 
+pseudo-observations with weights $p_i$ and $1-p_i$ and outcomes of 0 and 1.
+Alternatively, make use of covariates to fit a survival model, and use
+predicted values from that model.
+
+\paragraph{Pseudo-values}
+This approach replaces the 0/1 response for all subjects with a pseudo-value,
+which is based on the influence of each subject on the estimated survival
+at $\tau$.  The response time $t^*$ is now an uncensored continuous variable
+(binomial like in its distribution).
+
+Once the 'binomial' response has been created, then standard methods for
+validation of binomial data can be employed.
+This includes summaries of sensitivity, 
+specificity, postive and negative predicted value, and the AUROC.
+(This will not be the same as the concordance).
+Beyond these simple summaries, regression methods can be used to evaluate
+how the prediction model 
+works across the range of predicted risks. 
+Do those with lower predicted risk have higher survival, and in the pattern 
+that is predicted? 
+This can be approached by including the predicted probability as a term
+in binomial regression models, reminiscent of the Hosmer-Lemishow approach.
+
+If the reference model satisfies proportional hazards, e.g. either a Cox or
+Weibull fit, then we know that
+\begin{equation*}
+  \log(-\log(\phat_i(t))) = \eta_i + \log(\Lambda_0(t))
+\end{equation*}
+where $\etahat = X \hat\beta$ is the linear risk score based on the validation
+data set's covariates $X$ and coefficients $\hat\beta$ from the reference model.
+This leads directly to the idea of fitting a binomial regression model to
+the weighted $d_i$ values using a complimentary log-log link, and with 
+$\eta_i$ as the single predictor. 
+A series of models that treat $\eta$ as an offset term, as a linear predictor,
+or in a more flexible way such as a spline are often referred to as assessments
+of \emph{mean}, \emph{weak}, and \emph{moderate} calibration.
+The first model can be used to get confidence intervals for the observed/expected
+ratio, 
+a coefficient of 1.0 in the second shows that actual risk rises in magnitude as
+predicted by the model, and the nonlinear fit can reveal more subtle changes.
+
+Another option is to compute the ordinary $R^2$ statistic based on the 0/1 
+outcome $d_i$ and the predicted values $\hat p_i(\tau)$ from the reference model
+and $\hat p_0(\tau)$ a model with no covariates..
+\begin{align*}
+  R^2 &=  1- \frac{\sum w_i (d_i- \hat p_i)^2 / \sum w_i}
+                  {\sum w_i (d_i - \hat p_0)^2/ \sum w_i} \\
+      &=  1 - \frac{A}{B} \\
+  p_0 &=  \frac{\sum w_i d_i}{\sum w_i}
+\end{align*}
+
+When the first step was based in the RTTR, then
+the numerator $A$ of the fraction is also known as the Brier score, 
+and $A/B$ is Kattan's index of prediction.
+From the equivalence of the RTTR and Kaplan-Meier, we also know that $p_0$ 
+above is
+the value of the overall KM of the validation data set, at $\tau$.
+
+\subsection{Re-modeling appoach}
+A very useful approach described in Austin et al \cite{Austin20} is 
+to combine imputation and modeling into a single step.
+That is, fit a survival model to the validation data, using the linear
+predictor from the reference model as the covariate; as this deals with censoring
+in a natural way.
+Most often this second step is done using a Cox model, of course, as it is the
+most popular survival model.
+If this second model is a correct model for the outcome, then it also will be
+immune to the censoring pattern, if censoring is a predictable process.
+
+
+Assuming that the cutoff time $\tau$ was chosen with serious thought, as should
+always be the case, then any events after $\tau$ are, strictly speaking,
+irrelevant.  A modeling approach that uses all the events will be subject to
+a classic bias/variance trade-off: using information after $\tau$ can provide
+more precision, but only to the extent that the reference model remains true
+beyond that chosen cutoff.  In the figure, this is particularly true for the
+uncensored case: about 15\% of the simulated events occur after time 4, 
+censoring systematically reduces that proportion.
+
+\section{Examples}
+\subsection{Simulation}
+To better understand the impact of censoring we employ a set of simulation
+data sets. The reference model is based on a fit using 2982
+primary breast cancer patients from the Rotterdam tumor bank.
+Simulated times for samples of $n$ subjects are created from that model; data
+sets 1--5 share identical covariates and true survival times, and differ only in 
+the censoring that is applied.
+\begin{enumerate}
+  \item  No censoring, used as a reference.
+  \item  Random administrative censoring, $U(a,b)$.
+  \item  Risk specific censoring using an exponential censoring time,
+    chosen so that those at the 80th
+  percentile of risk have approximately 2x the censoring rate of those at the
+  20th percentile.
+  \item As in 2, but reversed.  Those with a lower death rate have higher 
+    censoring.
+  \item Informative censoring: a random 10\% of the subjects are removed from the
+  study 2--5 months before their death, along with administrative censoring that
+  applies to all.
+\end{enumerate}
+For each of the data sets we targeted 50\% censoring by 4 years, and all our 
+illustrations will use $\tau =4$. 
+
+For all these cases the simulated survival times are drawn from the true
+model, and a perfect validation would show that they agree with the reference
+model perfectly.  The question is whether censoring obscures this fact.
+There are two reference models, the first a Cox model fit
+and the second a log-logistic accelerated failure time (AFT) fit.
+
+Figures \ref{validatez1} and \ref{validatez2} show results for the RTTR in 
+the upper most lines, for each of the 5 censoring patterns.
+For both no censoring and random censoring the estimates for mean calibration
+(observed/expected) and calibration slope are close to 1, as expected. 
+When there is risk-dependent censoring, then biases appear: either an
+upward bias in the mean in case 3 or downward in case 4. 
+(I'd like to understand why this particular pattern occurs, but have not yet
+worked it out.  I knew that resistance to non-random censoring was not
+guaranteed, but didn't know what to expect.)
+An appropriate response to this bias, not shown here, would be to use more
+general inverse probability of censoring (IPCW), based on a model for censoring
+that included the risk score as a predictor.
+
+For the informative censoring of case 5 the number of \emph{reported} deaths
+in the validation data set is systematically too small.  None of the 4
+methods can overcome this systematic bias, nor do we expect them to.
+
+
+\begin{figure}
+ \includegraphics[width=\textwidth]{figures/validatez1}
+ \caption{Results for four different methods when the true data comes from
+   a proportional hazards model, with various censoring patterns.  Each line
+   spans the 10th and 90th percentiles of simulation results, the median is
+   marked as a point.}
+  \label{validatez1}
+\end{figure}
+
+\begin{figure}
+ \includegraphics[width=\textwidth]{figures/validatez2}
+ \caption{Results for four different methods when the true data comes from
+   a proportional hazards model, with various censoring patterns.
+   Each line
+   spans the 10th and 90th percentiles of simulation results, the median is
+   marked as a point.}
+  \label{validatez2}
+\end{figure}
+
+Figures \ref{validatez3} and \ref{validatez4} show results when the true
+model is a log-logistic AFT.  For the RTTR there are no obvious changes in
+the pattern.
+
+\begin{figure}
+ \includegraphics[width=\textwidth]{figures/validatez3}
+ \caption{Results for four different methods when the true data comes from
+   a log-logistic AFT model, with various censoring patterns.  Each line
+   spans the 10th and 90th percentiles of simulation results, the median is
+   marked as a point.}
+  \label{validatez3}
+\end{figure}
+
+\begin{figure}
+ \includegraphics[width=\textwidth]{figures/validatez4}
+ \caption{Results for four different methods when the true data comes from
+   a log-logistic AFT model, with various censoring patterns.
+   Each line
+   spans the 10th and 90th percentiles of simulation results, the median is
+   marked as a point.}
+  \label{validatez4}
+\end{figure}
+
+In real datasets it will be important to look for non-linear patterns as well.
+Figure \ref{validatea1} shows results from fitting a 3 degree of freedom
+natural spline to two simulation instances.  In the left two panels the 
+underlying model is true, and in the right two the true risk was subjected to
+an upper threshold.
+Two choices for the non-linear plot are to show the usual logistic results, as
+displayed in the top two panels. 
+The horizontal axis is the linear predictor from the reference model, 
+which was used as the covariate in the model, and the vertical axis is the
+predicted value from the model.  Usual standard errors and tests are available,
+the graph shows pointwise 95\% intervals, along with the $p$-value for a test
+of non-linearity.
+The bottom row compares the predicted 4 year death rate from the reference
+model to the predicted response from the logistic.  In this case we have
+quantiles of the error, absolute deviation from the $y=x$ line, 
+summary statistics suggested in Austin \cite{Austin20}. 
+
+\begin{figure}
+  \includegraphics[width=\textwidth]{figures/validatea1}
+  \caption{Spline fits for a case where the reference model is correct (left)
+    and when there is a non-linear relationship between the predicted response
+    of the reference model and the true risk (right).  The top panels show
+    standard logistic regression plots for the fitted spline, along with a
+    p-value for a test for non-linearity.  The bottom panels compare the
+    predicted probability of death in 4 years to the predictions from the model.
+    They include the 50th and 90th percentiles of the difference between the
+    curve and the $y=x$ line.  All panels include the $y=x$ reference as a 
+    dotted line.}
+ \label{validatea1}
+\end{figure}
+
+Yet to do: Find a compact way to summarize the nonlinear over the censoring
+distributions and the PH vs AFT models.  A quick look shows that the
+censoring matters here too.  
+
+The third set of lines in Figures \ref{validatez1}--\ref{validatez4} show 
+results for this counting process approach, and we see that it matches the
+expectations: the results are not affected by censoring patterns 1--3, 
+nor by the underlying model type, as long as the model is correct.  
+ 
+
+Figures \ref{validatez3} and \ref{validatez4} highlight two aspects of the
+fit.  First, the Cox model fit to the validation data set is not, in this
+case, a correct model for the data, and the
+result is no longer immune to changes in
+censoring pattern between random, a, and b.  
+Second, in the no censoring case we see that the 
+regression slope is seriously underestimated; this is a systematic bias
+due to fitting a proportional hazards model to data that is not PH.  
+This latter effect is ameliorated by
+censoring: the non-proportionality effect of the log-logistic is diminished
+by a reduced time range.  
+
+If the validation data set is sufficiently large, an alternative is to fit a more
+flexible survival model to the validation data, and thereby avoid the more
+severe effects shown in this last case.  As always, we will face the trade-offs
+between flexibility, efficiency and potential bias.
+
+
+Looking at the last 5 lines of Figures \ref{validatez1} and \ref{validatez2} 
+we see that this method is also unbiased, for all but the last censoring
+pattern; no method is immune to that bias. 
+We also notice that the spread of values is tighter than others; 
+this method appears to
+be more efficient than the counting process approach.
+The reason for this last, however, is that the prior three approaches use only
+the event information up to time $\tau$, 4 years in this example,
+whereas the modeling approach commonly is coded to use all the events, both
+those before and after $\tau$.
+
+\subsection{Risk score for amyloidosis}
+\begin{figure}
+<<amyloid1, echo=FALSE>>=
+amyloid <- read.csv("data/mcompare.csv", header=TRUE)
+amyloid$am.dt <- as.Date(amyloid$am.dt, format="%Y-%m-%d")
+if (FALSE) { # used in the text below
+    range (amyloid$am.dt)
+    temp <- with(amyloid, table(status, 
+                       cut(surv.months, c(0, 6, 12, 24, 36, 48, 60, 500))))
+    temp
+    cumsum(temp[1,])
+}
+raw2004 <- read.csv("data/amyloid2004.csv", header=FALSE)
+names(raw2004) <- c("months", "survival")
+plot(survival ~ months, data=raw2004, cex=.5, xlab="Months", ylab="Survival")
+abline(v=c(6,12, 24, 36, 48, 60), lty=2)
+@
+  \caption{Digitized figure from the 2004 study.}
+  \label{validate2004}
+\end{figure}
+ 
+The amyloidosis example is based on a validation study that used follow-up
+from 1005 amyloidosis subjects from 12/2003 through 8/2015, from a single
+institution, to evaluate 4 different prediction models from the literature:
+published in 2004, 2012, 2013, and 2015 \cite{Muchtar19}.
+Each of these four models is based on a simple counting score. The 2004 model
+for instance uses 3 groups based on serum cardiac troponin $<$ .035 $\mu$g/L 
+(cTnT) and N-terminal pro-brain natriuretic peptide $<$ 332 ng/L (NT-proBNP);
+subjects have 0, 1 or 2 markers above threshold.
+The 2012 and 2015 models define 4 risk groups, the 2013 model 5 groups.
+The latter two specifically build on the 2004 model by using the same criteria
+for risk groups 0 and 1, then more finely dividing the highest risk subset.
+Predictions for the 1005 validation subjects were obtained by first digitizing
+the published survival curves from the four studies, then reading off values 
+at 6, 12, 24, 36, 48 and 60 months.  Where
+curves overlap or nearly overlap some judgement is required.
+Figure \ref{validate2004} shows the digitized data for the 2004 study.
+
+<<amylconcord, echo=FALSE>>=
+# Concordance for the amyloidosis data, over all time
+afit0 <- coxph(Surv(surv.months, status) ~ number.organs, amyloid)
+afit1 <- coxph(Surv(surv.months, status) ~ mayo.2004, amyloid)
+afit2 <- coxph(Surv(surv.months, status) ~ mayo.2012, amyloid)
+afit3 <- coxph(Surv(surv.months, status) ~ euro.2013, amyloid)
+afit4 <- coxph(Surv(surv.months, status) ~ euro.2015, amyloid)
+cfit1 <- concordance(afit0, afit1, afit2, afit3, afit4)
+cfit2 <- concordance(afit0, afit1, afit2, afit3, afit4, timewt="n/G2")
+temp <- vcov(cfit1)
+temp2 <- diag(sqrt(1/diag(temp)))
+corr.mat <- temp2 %*% temp %*% temp2
+cfit3 <- concordance(afit0, afit1, afit2, afit3, afit4, ymax=60)
+cfit4 <- concordance(afit0, afit1, afit2, afit3, afit4, ymax=60, timewt="n/G2")
+
+wt5 <- rttright(Surv(surv.months, status) ~ 1, amyloid, times=60)
+y5  <- 1*(amyloid$surv.months <=60 & amyloid$status==1)
+temp0 <- lm(y5 ~ number.organs, amyloid, weights= wt5, subset=(wt5>0))
+temp1 <- lm(y5 ~ mayo.2004    , amyloid, weights= wt5, subset=(wt5>0))
+temp2 <- lm(y5 ~ mayo.2012    , amyloid, weights= wt5, subset=(wt5>0))
+temp3 <- lm(y5 ~ euro.2013    , amyloid, weights= wt5, subset=(wt5>0))
+temp4 <- lm(y5 ~ euro.2015    , amyloid, weights= wt5, subset=(wt5>0))
+cfit5 <- concordance(temp0, temp1, temp2, temp3, temp4)  
+
+contr.func <- function(cfit, contr) {
+    conc <- coef(cfit)
+    cvar <- vcov(cfit)
+    if (length(contr) != nrow(cvar)) stop("wrong length for contrast")
+    numer <- sum(conc* contr)
+    denom <- sqrt(contr %*% cvar %*% contr)
+    c(diff= numer, std= denom, z= numer/denom)
+}
+zmat <- matrix(0, 5,5)
+for (i in 1:4) {
+    for (j in (i+1):5) {
+        contr <- double(5)
+        contr[i] <- -1
+        contr[j] <- 1
+        zmat[i,j] <- zmat[j,i] <- contr.func(cfit3, contr)["z"]
+    }
+}
+@ 
+
+We will declare 5 year survival as our clinical target, given the severity of
+the disease.  Of the 1005 validation subjects 516 (51\%) die before
+5 years, 183 (18\%) are censored before 5 years and 306 have 5+ years of
+follow-up.
+Table \ref{vtabaml1} shows the concordance values for the four prediction
+models, along with a simplistic `baseline' model that uses only the number
+of involved organs (1--4) for each subject.  
+We see that in terms of discrimination, there is little to choose between the
+four models, all of which are better than a simplistic prediction that uses only
+the number of involved organs. 
+Different risk set weights have the most impact when there are few subjects
+remaining at risk, setting $\tau=5$ makes the choice of weight largely 
+irrelevant. 
+The AUCROC is based on a discretized outcome.  It addresses a slightly different
+question and is systematically somewhat larger, but also with a larger variance.
+
+Formal comparisons between the values on any given line of the table can be
+computed, by making use of an infinitesimal jackknife variance.
+Using $tau$= 5 years, the concordance for organ count is significantly
+smaller than all 
+others ($Z > 7.5$) and the Mayo 2004 concordance is smaller than the two 
+Euro 2013 and 2015 models ($Z > 6.6$).
+[Compute and show this in the companion document?  I'm not convinced that 
+p-values are relevant here.]
+
+
+\begin{table}
+  \begin{tabular}{rlllll}
+    & Organs & 2004 & 2012 & 2013 & 2015 \\ \hline
+<<vtabaml1, echo=FALSE, results="asis">>=
+cat("All time, Harrell &", paste(sprintf("%4.2f", cfit1$concordance), 
+                                 collapse=" & "), "\\\\ \n")
+cat("All time, Uno &", paste(sprintf("%4.2f", cfit2$concordance), 
+                             collapse=" & "), "\\\\ \n")
+cat("0-5 years, Harrell &", paste(sprintf("%4.2f", cfit3$concordance), 
+                                  collapse=" & "), "\\\\ \n")
+cat("0-5 years, Uno &", paste(sprintf("%4.2f", cfit4$concordance), 
+                              collapse=" & "), "\\\\ \n")
+cat("5 year AUROC &", paste(sprintf("%4.2f", cfit5$concordance), 
+                              collapse=" & "), "\\\\ \\hline \n")
+cat("Cor with 2015 &", paste(sprintf("%4.2f", corr.mat[5,]),  
+                             collapse=" & "), "\n")
+@ 
+  \end{tabular}
+  \caption{Concordance between 5 different predictive models and the
+    validation outcome, using either the Harrell or Uno weighting of
+    risk sets, or an AUROC at 5 years.
+    The Harrell and Uno $C$ values have a standard error of 0.01, the
+    AUROC values an se of .19--.24.
+    The last line shows correlation between other $C$ values and the 2015 model,
+    for line 1.}
+  \label{vtabaml1}
+\end{table}
+
+Although the models are very close to equal in discrimination, there are
+large differences in predicted absolute risk. The underlying data is shown
+in table \ref{valaml2}, which shows the number of subjects in each subgroup, for
+each of the risk models, along with predicted death rates, 
+and observed death rates at 5 years for each subset in the validation data.
+The 2004 model was widely adopted for risk stratification; the 2013 and 2015
+publications suggest improvements that further subdivide only the highest stage;
+i.e., stage I of the 2015 paper is identical stage 0 of the 2004 model, yet the
+predicted 5 year death rate drops from 74\% to 0.
+The large difference reflects the fact that the time period from 2004 to 2015
+saw major gains in the treatment of amyloidosis and subsequent survival.
+The relative utility of the 2004 categorization remains, but absolute 
+predictions are not useful. 
+
+\begin{table}
+  \begin{tabular}{cccccccccccc}
+    & \multicolumn{3}{c}{2004} & \multicolumn{4}{c}{2012} &
+      \multicolumn{4}{c}{2015} \\
+      & 0 & 1 & 2 & 0 & 1 & 2 &3 &I & II &IIIa & IIIb \\ \hline
+<<valaml2, echo=FALSE, results="asis">>=
+# Assemble the predictions for the four methods
+load("data/amodel.rda")
+# counts of each stage, in the validation data
+counts <- matrix(NA, 4,5, 
+                 dimnames= list(c("2004", "2012","2013", "2015"), 0:4))
+counts[1, 1:3] <- table(amyloid$mayo.2004)
+counts[2, 1:4] <- table(amyloid$mayo.2012)
+counts[3, 1:5] <- table(amyloid$euro.2013)
+counts[4, 1:4] <- table(amyloid$euro.2015)
+temp <- t(counts[-3,])
+temp <- format(temp[!is.na(temp)])
+cat("n (validation)&", paste(temp, collapse= " & "), "\\\\ \n")
+
+phat6 <- matrix(NA,4,5) # phat from the papers, at 6 years
+phat6[1, 1:3] <- 1- a2004$surv[a2004$month==60]
+phat6[2, 1:4] <- 1- a2012$surv[a2012$month==60]
+phat6[4, 1:4] <- 1- e2015$surv[e2015$month==60]
+temp <- t(phat6[-3,])
+temp <- temp[!is.na(temp)]
+cat("6 year death, predicted&", paste(sprintf("%4.2f", temp), collapse= " & "),
+    "\\\\ \n") 
+
+# simple KM
+pkm <- phat6
+sfun <- function(fit) 1- summary(fit, time=6, extend=TRUE)$surv
+pkm[1, 1:3] <- sfun(survfit(Surv(surv.months, status) ~ mayo.2004, amyloid))
+pkm[2, 1:4] <- sfun(survfit(Surv(surv.months, status) ~ mayo.2012, amyloid))
+pkm[3, 1:5] <- sfun(survfit(Surv(surv.months, status) ~ euro.2013, amyloid))
+pkm[4, 1:4] <- sfun(survfit(Surv(surv.months, status) ~ euro.2015, amyloid))
+temp <- t(pkm[-3,])
+temp <- temp[!is.na(temp)]
+cat("6 year death, KM &", paste(sprintf("%4.2f", temp), collapse= " & "), "\n")
+@ 
+  \end{tabular}
+  \caption{Counts in the validation data set, predicted death rate at 6 years 
+    from each model, and Kaplan-Meier estimates in the validation data.
+  (The 2013 paper's curve stop short of 5 years.)}
+  \label{valaml2}
+\end{table}
+
+For a simple categorical prediction such as this, the problem of censoring in
+the validation data set has a very simple solution, i.e., a per-subgroup
+Kaplan-Meier.  The more sophisticated models can still be used, examples are
+displayed in the companion document.
+
+\subsection{Rotterdam and GBSG studies}
+A validation example is set forth in Royston and Alman \cite{Royston13b}
+that uses 2982 primary breast cancers patients
+whose records were included in the Rotterdam tumor bank data to build an
+initial model, and 626 subjects in a 1984-1989 trial from the German
+Breast Study group as the validation data set.  Importantly, the
+data was made available for others and has been used in many subsequent papers.
+Figure \ref{valrott1} shows the overall survival curves for
+both cohorts.  
+
+\begin{figure} 
+<<valrott1, echo=FALSE>>=
+# the two data sets do not have exactly the same variables
+rott2 <- rotterdam
+# recurrence free survival = rfs = earlier of recurrence or death
+rott2$ryear <- with(rotterdam, pmin(rtime, dtime))/365.25
+rott2$rfs   <- with(rotterdam, pmax(recur, death))
+
+# This is a pretty good model
+rfit <- coxph(Surv(ryear, rfs) ~ meno + size + grade + pmin(nodes,10), rott2)
+rfit2 <- survreg(Surv(ryear, rfs) ~ meno + size + grade + pmin(nodes,10),
+                 data=rott2, dist="loglogistic")
+gbsg2 <- subset(gbsg, select=c(size, grade, nodes, meno, rfstime, status))
+gbsg2$size <- cut(gbsg$size, c(-1, 20, 50, 1000),
+                       c("<=20", "20-50", ">50"))
+gbsg2$ryear <- gbsg2$rfstime/365.25
+gbsg2$rfs   <- gbsg2$status
+
+rsurv <- survfit(Surv(ryear, rfs) ~ 1, rott2)
+gsurv <- survfit(Surv(ryear, rfs) ~ 1, gbsg2)
+plot(rsurv, conf.int=FALSE, lwd=2, 
+     xlab="Years since diagnosis", ylab="Recurrence free survival")
+lines(gsurv, conf.int=FALSE, lwd=2, lty=2)
+@ 
+  \caption{Overall survival for the Rotterdam (solid) and GBSG (dashed)
+    participants.}
+  \label{valrott1}
+\end{figure}
+
+Initial exploration showed that menopausal status, tumor size, tumor
+grade, and the number of positive lymph nodes are important variables
+for a multivariate survival model in the Rotterdam data.
+The number of lymph nodes is a continuous variable with a wide range
+of 0--34, a spline fit to the data shows a fairly linear increase in
+risk up to 10 nodes, and none thereafter.  Table xxx shows the
+fitted Cox model.
+
+As will always be the case, the data sets do not exactly match.
+The most obvious difference is shorter follow-up for the GBSG study.
+Another is that the Rotterdam data contains follow-up to death and to
+recurrence as separate variables, while the GBSG data set has a single
+endpoint of recurrence free survival (the earlier of recurrence or death).
+The GBSG data has continuous tumor size while the Rotterdam tumor data is
+categorical: 0-20, 20-50, and 50+ cm; so we create a categorical version in the
+GBSG data.
+With respect to nodes, 48\% of the Rotterdam patients are node-negative
+(0 affected lymph nodes), while none of the GBSG subjects are. 
+Rotterdam subjects have grade 2 or 3, GBSG grades 1-3. 
+None of these are fatal to the comparison, but should always be borne in
+mind.  For instance, if the step from grade 1 to grade 2 is much larger,
+biologically, then the step from 2 to 3, then extrapolation of Rotterdam results
+to grade 1 GBSG subjects might be questionable.  
+
+<<valrott2, echo=TRUE>>=
+# replace this with a table
+print(rfit, digits=2)
+@ 
+ 
+The baseline or reference fit, using the Rotterdam data, will use all the
+subject's data.
+If there is evidence for non-proportional hazards (and there is), then one
+can reasonably argue that if validation will be focused at $\tau$ years, then 
+reference fit restricted to the first $\tau$ years after enrollment would
+be more likely to replicate.
+Our rationale for using all the data is that first, in the common case where
+the reference fit was done first, with later external validation based in the
+published report of that fit, the original authors would not know that 
+a ``4 year'' model will later be desired, and secondly that many published 
+fits ignore issues with PH.  [This latter comment may be too pessimistic.]
+
+\begin{figure}
+<<valrott3>>=
+# Compute the concordance and R^2 over time.
+ghat <- predict(rfit, newdata=gbsg2, type="lp")
+mtime <- (12:84)/12  # monthly for 12 years
+gwt <- rttright(Surv(ryear, rfs) ~ 1, gbsg2, times= mtime)
+gbrier <- brier(rfit, mtime, gbsg2)
+r2 <- gbrier$rsquared  # R^2 over time
+
+# C statistic over time
+cstat <- matrix(0, length(mtime), 6)  # Uno, Harrell, AUROC, then se of each
+for (i in 1:length(mtime)) {
+    c1 <- concordance(rfit, newdata=gbsg2, ymax=mtime[i])
+    c2 <- concordance(rfit, newdata=gbsg2, ymax=mtime[i], timewt= "n/G2")
+    yy <- with(gbsg2, ifelse(ryear <= mtime[i] & rfs==1, 1, 0))
+    c3 <- concordance(yy ~ghat, weight= gwt[,i], subset=(gwt[,i]>0))
+    cstat[i,] <- c(coef(c1), coef(c2), coef(c3), 
+                   sqrt(c(vcov(c1), vcov(c2), vcov(c3))))
+}
+
+if (TRUE) { # for me
+    delta <- cstat[,4:6]  # do 1 se lines
+    yy <-  cbind(cstat[,1:3], r2+.5, cstat[,1:3]- delta, cstat[,1:3]+ delta)
+#    matplot(mtime, yy, type='l', 
+    matplot(mtime, yy[,1:4], type='l', 
+            lwd= rep(2:1, c(4,6)), lty=rep(1:2, c(4,6)), col= c(1:4, 1:3, 1:3),
+             xlab="Threshold", ylab="Concordance")
+    # Interesting: concordance moves around
+    legend(3, .61, c("Harrell", "Uno", "AUROC", "R2 + .5"), lty=1, col=1:4,
+           lwd=2, bty='n')
+}
+@ 
+  \caption{Concordance of the Rotterdam prediction for the GBSG data set, 
+    as a function of the threshold $\tau$ that is chosen, along with the
+    estimated AUROC and $R^2$ for that time point based on IPC weights.}  
+   \label{valrott3}
+\end{figure}
+
+Figure \ref{valrott3} shows multiple indices of discrimination as a function
+of the chosen threshold $\tau$.  The $C$ statistics have a median standard
+error of .017 and the AUROC a median of .024, i.e., the visible differences 
+between these three are not particularly noteworthy, though the patterns
+are interesting.
+The AUROC does become unstable at the far right, but this is not surprising.
+At year 7 there are only 3 subjects remaining in the risk set, each with an
+IPC weight of 78.4; `validating' seven year survival when so few have 
+sufficient follow-up is unrealistic. 
+$R^2$ for the categorized 0/1 response, which is a scaled Brier score, follows
+a similar pattern as the AUROC.  
+
+\begin{figure}
+<<valrott4>>=
+# Compute calibration curves at 4 years
+rfun <- function(tau, data=gbsg2) {
+    y4 <- with(data, ifelse(ryear <= tau & rfs==1, 1, 0))
+    gwt <- rttright(Surv(ryear, rfs) ~ 1, data, times=tau)
+    glm(y4 ~ ns(ghat, 3), weight= gwt, family= quasibinomial(link="cloglog"), 
+        data= data, subset= (gwt>0))
+}
+rttrfit <- rfun(4)    
+mfit <- coxph(Surv(ryear, rfs) ~ ns(ghat, 3), data=gbsg2)
+
+# To get a 4 year max out of predict.coxph, we need to modify the data
+tdata <- gbsg2
+tdata$ryear <- pmin(tdata$ryear, 4)
+tdata$rfs   <- 1*(tdata$ryear <=4 & tdata$rfs==1)
+tdata$phat <- predict(rfit, newdata=tdata, type='expected')
+pfit <- glm(rfs ~ ns(ghat, 3) + offset(log(phat)), poisson, tdata,
+            subset= (phat> 0))
+pfit0 <- glm(rfs ~ offset(log(phat)), poisson, tdata,
+            subset= (phat> 0))
+t1 <- termplot(rttrfit, se=T, plot=FALSE)[[1]]
+t2 <- termplot(mfit, se=TRUE, plot=FALSE)[[1]]
+t3 <- termplot(pfit, se=TRUE, plot=FALSE)[[1]]
+y1 <- t1$y + outer(t1$se, c(0, -1.96, 1.96), '*')
+y2 <- t2$y + outer(t2$se, c(0, -1.96, 1.96), '*')
+y3 <- t3$y + outer(t3$se, c(0, -1.96, 1.96), '*') + t3$x  # excess risk model
+matplot(t2$x, cbind(y2-1, y3+1), type='l', col=1, #col=c(3,3,3,2,2,2), 
+        lty=c(1,2,2,1,2,2),
+        lwd= c(2,1,1,2,1,1), ylim=range(c(y1, y2-1, y3+1)), 
+        xlab="Linear predictor", ylab="Effect")
+matlines(t1$x, y1, col=1, lty=c(1,2,2), lwd=c(2,1,1))
+abline(-2, 1, lty=3)
+abline(2,  1, lty=3)
+@    
+   \caption{Estimated relationship between the linear predictor, based on the
+     reference model, and the outcomes in the validation data set.
+     The dotted lines have slope=1 and are for visual reference, dashed lines
+     are pointwise 95\% confidence intervals, solid are based on a natural
+     spline with 3 degrees of freedom.
+     Top line: counting process approach, offset by +1. Middle line: RTTR
+     approach.  Bottom line: modeling approach, offset by -1.}
+   \label{valrott4}
+\end{figure}
+
+Figure \ref{valrott4} gives an assessment of potential
+non-linear effects, often referred to as a `moderate' 
+assessments of calibration; the models use the linear predictor from the 
+reference model as the single predictor in a spline term.  The effect is
+so close to linear that a separate test for an overall slope of 1
+(`weak' calibration) is not really necessary in this case. 
+We can also plot curves on probability scale as shown in Figure
+\ref{valrott5}, for the modeling method, 
+as suggested in Austin et al \cite{Austin20}.  
+They label x an y axes in this figure as ``predicted'' and
+``observed'', but we would argue that the latter label is dishonest.
+It is actually a plot of the prediction under the reference model (x) versus
+prediction under a model fit directly to the validation data.
+(A good idea but a bad label).
+
+\begin{figure}
+<<valrott5>>=
+tempr <- summary(survfit(rfit), time=4)$cumhaz
+phatr <- 1 - exp(-tempr * exp(ghat))
+tempm <- summary(survfit(mfit), time=4)$cumhaz
+phatm <- 1- exp(-tempm * exp(mfit$linear.predictor))
+plot(phatr, phatm, xlab="P(4; Rotterdam)", ylab= "P(4, refit)")
+abline(0,1, lty=2)
+@  
+   \caption{Predicted values of the probability of recurrence or death within
+     four years under the reference model, fit to the Rotterdam data, versus
+     the predicted value from a Cox model fit directly to the validation
+     data.}
+    \label{valrott5}
+\end{figure}
+
+As an example, GBSG validation of the Rotterdam model is perhaps too good,
+and thus does not teach us very much.
+Since the GBSG data is from a clinical trial the censoring is almost entirely
+administrative and thus independent of survival, and calibration is near perfect.
+In such a scenario all the methods work identically.
+     
+[Note: I don't understand why the counting process shows about a death rate of
+  .98 of expected, and the modeling approach 1.07 of expected.]
+<<mean, eval=FALSE>>=
+y4 <- with(gbsg2, ifelse(ryear <= 4 & rfs==1, 1, 0))
+gwt <- rttright(Surv(ryear, rfs) ~ 1, gbsg2, times=4)
+oe.rttr <- sum(y4*gwt)/sum(phatr*gwt)
+gfit0 <- glm(y4 ~ offset(log(-log(1-phatr))), quasibinomial(link="cloglog"),
+             weight= gwt, subset=(gwt>0))
+oe.rttr2 <- exp(coef(gfit0))
+
+tfit <- coxph(Surv(ryear, 1-rfs) ~ ghat, gbsg2)
+ # There is some risk dependent censoring, and zph shows that it is not PH
+ # Is that enough?
+@ 
+
+\subsection{PBC}\subsection{PBC}
+The \code{pbc} data set in R contains information for 312 subjects 
+with primary biliary cirhossis (PBC) who were 
+enrolled in a clinical trial of D-penicilline versus placebo, along with
+another 106 who declined to be randomized but agreed to baseline laboratory
+tests and yearly follow-up.  
+As a simple test, fit a Cox model to the randomized subjects, and validate it
+on the passive subjects.  
+It is well known that the set of subjects who agree to enrollment in a clinical
+trial is often a select subset.
+
+<<valpbc1>>=
+pbc1 <- subset(pbc, !is.na(trt))
+pbc1$death <- 1*(pbc1$status ==2)
+pbc1$year <- pbc1$time/365.25
+
+pbc2 <- subset(pbc, is.na(trt) & !is.na(protime))
+pbc2$death <- 1*(pbc2$status==2)
+pbc2$year <- pbc2$time/365.25
+
+pfit <- coxph(Surv(year, death) ~ age + log(bili) + log(protime) +
+                  log(albumin) + edema, pbc1)
+# predicted survival probability at 2 and 5 years
+phat <- 1- t(summary(survfit(pfit, newdata=pbc2), time=c(2,5))$surv)
+pbc2$expect <- predict(pfit, newdata=pbc2, type="expected")
+pbc2$eta <- predict(pfit, newdata=pbc2, type="lp")
+@ 
+
+
+\begin{figure}
+<<valpbc2>>=
+oldpar <- par(mfrow=c(1,2), mar=c(5,5,1,1))
+d1 <- density(predict(pfit))  # linear predictor
+d2 <- density(pbc2$eta)
+matplot(cbind(d1$x, d2$x), cbind(d1$y, d2$y), col=1:2, lty=1, lwd=2, type='l',
+        xlab="Risk score", ylab= "Density")
+legend(1, .3, c("Randomized", "Secondary"), col=1:2, lwd=2, 
+       lty=1, bty='n', cex=.7)
+psurv1 <- survfit(Surv(year, death) ~1, pbc1)
+psurv2 <- survfit(Surv(year, death) ~1, pbc2)
+plot(psurv1, lwd=c(2,1,1), xlab="Years since enrollment", ylab="Survival")
+lines(psurv2, col=2, lwd=2, conf.int=FALSE)
+par(oldpar)
+@ 
+   \caption{Fitted risk scores $X\beta$ for the randomized subjects and
+     predicted risk scores for the others (left panel), along with KM 
+     curves for the two subsets.}
+   \label{valpbc2}
+\end{figure}
+
+Figure \ref{valpbc2} shows the distribution of risk scores for the two
+cohorts, along with overall survival curves.
+The mean risk score for the reference data has been set to 0 by
+default, predicted risk score for the validation data has a 
+mean of \Sexpr{round(mean(pbc2$eta), 2)}.
+
+<<valpbc3>>=
+# poisson overall
+pfita <- glm(death ~ offset(log(expect)), poisson, data=pbc2)
+pfitb <- glm(death ~ eta + offset(log(expect)), poisson, data=pbc2)
+pfitc <- glm(death ~ ns(eta,4) + offset(log(expect)), poisson, data=pbc2)
+@ 
+
+This is as dull as the GBSG data set I just complained about.
+
+More interseting, if I can dig up the old data, might be the placebo and 
+arms of the UDCA study in PBC.  It is an interesting
+story: UDCA works, and the changes in liver lab tests that it induced were such
+that the the PBC risk score, applied using updated data, is surprisingly 
+accurate.  That is, the effect of UDCA was well captured by the liver function
+tests used in the PBC risk score.  The risk score is a surrogate endpoint.
+
+
+\section{Monoclonal Gammopathy}
+There are 2 data sets in the package that contain follow-up on patients with
+MGUS, and earlier time frame with 241, and a later one with 1384.  There are
+a few patients in common (30) which I will ignore for the moment.
+
+\begin{figure}
+<<mfig1>>= 
+oldpar <- par(mfcol=c(2,3), mar=c(5,5,1,1))
+km1 <- survfit(Surv(futime, death) ~ sex, mgus)
+km2 <- survfit(Surv(futime, death) ~ sex, mgus2)
+plot(km1, col=1:2, lwd=2, xscale=365.25, xlab="Years from diagnosis")
+lines(km2, col=1:2, lwd=2, lty=2, xscale=365/12)
+
+# fix up variables
+mgus2$futime <- mgus2$futime * 365.25/12
+levels(mgus2$sex) <- levels(mgus$sex)
+
+km2 <- survfit(Surv(futime, death) ~ sex, mgus2)
+plot(km1, col=1:2, lwd=2, xscale=365.25, xlab="Years from diagnosis")
+lines(km2, col=1:2, lwd=2, lty=2, xscale=365/12)
+
+d1 <- density(mgus$age)
+d2 <- density(mgus2$age)
+matplot(cbind(d1$x, d2$x), cbind(d1$y, d2$y), type='l', lwd=2, col=1,
+        xlab="Age", ylab="Density")
+
+d3 <- with(mgus, density(hgb[!is.na(hgb)]))
+d4 <- with(mgus2, density(hgb[!is.na(hgb)]))
+matplot(cbind(d3$x, d4$x), cbind(d3$y, d4$y), type='l', lwd=2, col=1,
+        xlab="Hemoglobin", ylab="Density")
+
+fit1 <- coxph(Surv(futime, death) ~ pspline(age) + sex + pspline(hgb), mgus)
+termplot(fit1, term=1, se=TRUE, col.term=1)
+termplot(fit1, term=3, se=TRUE, col.term=1)
+par(oldpar)
+@
+  \caption{Survival and covariates for the MGUS data.}
+  \label{mfig1}
+\end{figure}
+
+<<mgus2, echo=TRUE>>=
+fit2 <-  coxph(Surv(futime, death) ~ age + sex + pmin(hgb, 14), mgus)
+fit2
+@ 
+
+\end{document}
+
+
+
+
+ 
